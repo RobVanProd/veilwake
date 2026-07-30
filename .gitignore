@@ -1,0 +1,16 @@
+# Captures are regenerated on demand by the game itself. Only the deliberate
+# reference images in evidence/baseline/ are committed.
+evidence/*.png
+evidence/*.json
+!evidence/baseline/
+
+# Fetched on demand from the official Cloudflare release; 54MB.
+tools/cloudflared.exe
+
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/

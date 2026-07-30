@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#05070b">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="description" content="Pilot a small ship through an endless ocean of living cloud. Something enormous is already aware of you.">
+<title>VEILWAKE</title>
+
+<!-- Vendored, not fetched. There is no build step and no runtime CDN: the game
+     must run from a folder, offline, forever. -->
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js" } }
+</script>
+
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0; padding: 0; overflow: hidden;
+    height: 100dvh; min-height: 100%;
+    background: #05070b;
+    overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    font-family: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    color: #b9c7da;
+  }
+  #stage { position: fixed; inset: 0; }
+  #gl { width: 100%; height: 100%; display: block; touch-action: none; }
+
+  #diag {
+    position: fixed; top: 10px; right: 12px;
+    font-size: 11px; line-height: 1.45; white-space: pre; text-align: right;
+    color: #6f8299; pointer-events: none;
+    text-shadow: 0 1px 3px rgba(0,0,0,.9); opacity: .9;
+  }
+  #diag.hidden { display: none; }
+  #diag b { color: #d3e2f2; font-weight: 600; }
+  #diag .bad { color: #ff7b7b; }
+
+  #boot {
+    position: fixed; inset: 0; display: grid; place-items: center;
+    background: #05070b; color: #7f93ab; font-size: 12px; letter-spacing: .22em;
+    transition: opacity .6s ease;
+  }
+  #boot.gone { opacity: 0; pointer-events: none; }
+
+  #fatal {
+    position: fixed; inset: 0; display: none; place-content: center;
+    padding: 6vw; background: #05070b; color: #ffb4b4;
+    font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow: auto; z-index: 99;
+  }
+  #fatal.show { display: grid; }
+</style>
+</head>
+<body>
+  <div id="stage"><canvas id="gl"></canvas></div>
+  <div id="diag"></div>
+  <div id="boot">VEILWAKE</div>
+  <pre id="fatal"></pre>
+
+  <script type="module">
+    // A black canvas and a silent console is the worst failure mode for a game
+    // developed by something that cannot see the window. Anything thrown goes on
+    // screen where a screenshot will catch it.
+    const fatal = document.getElementById('fatal');
+    function show(err) {
+      fatal.classList.add('show');
+      fatal.textContent = (fatal.textContent ? fatal.textContent + '\n\n' : '') +
+        (err && err.stack ? err.stack : String(err));
+      console.error('[fatal]', err);
+    }
+    addEventListener('error', (e) => show(e.error || e.message));
+    addEventListener('unhandledrejection', (e) => show(e.reason));
+
+    import('./src/main.js').catch(show);
+  </script>
+</body>
+</html>
