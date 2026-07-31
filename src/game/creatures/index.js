@@ -9,4 +9,7 @@
 export * from './creature.js';
 export * from './corridor.js';
 export * from './listener.js';
+export * from './lantern.js';
+export * from './wakehunter.js';
+export * from './choir.js';
 export * from './manager.js';

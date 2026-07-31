@@ -202,6 +202,8 @@ uniform vec4  uShaft;        // ambient mist gain, sun shaft gain, phase g, loca
 uniform vec4  uShaftStep;    // first shadow step, growth, sample stride, stride growth per metre
 uniform vec3  uShaftRange;   // fade start, fade end, shadow assumed beyond it
 uniform float uShaftSigma;   // extinction for the SHAFT shadow only, not the cloud body
+uniform float uShaftFloor;   // in-scatter in genuinely empty air, 0..1
+uniform float uShaftDensGain;// how fast local density brings the in-scatter up
 
 uniform int   uLightCount;
 uniform vec4  uLightPos[MAX_LIGHTS];   // xyz cloud space, w = 1/radius
@@ -535,8 +537,38 @@ vec3 vw_mist(vec3 rd, float a, float b, float cosT, float jit,
   // exactly the term that misses it.
   float shadow = mix(exp(-uShaftSigma * tau), uShaftRange.z, far) * (1.0 - far);
 
+  // In-scatter needs scatterers, and this is the term that makes shafts read as
+  // shafts rather than as a wash.
+  //
+  // Measured on the CPU, at the camera the player actually occupies: the optical
+  // depth toward the sun was 1.000 lit with a standard deviation of 0.000 across
+  // 273 sampled directions at five distances. Nothing was casting a shadow,
+  // because the ship was sitting in one of the kilometres-wide gaps the coverage
+  // is deliberately built out of, and there was no cloud within 2.5 km in any
+  // direction. A ray through empty air still accumulated the full mist integral,
+  // so raising the gain to make beams visible near a cloud flooded every frame
+  // that was not near one — litFrac went from 26% to 99.9% between gain 0.25 and
+  // 1.6, which is the dust storm this term was already warned about.
+  //
+  // Gating on local density fixes both ends at once. Empty air scatters almost
+  // nothing, so the open sky stops washing out and the gain is free to be large;
+  // near a mass, where there is both vapour to scatter and cloud to occlude, the
+  // beams appear. That is also where crepuscular rays actually occur — you see
+  // them beside a cloud, never in clear sky — so the physics and the picture want
+  // the same thing here.
+  //
+  // The floor keeps the far field alive: without it, distance would stop
+  // dissolving into haze and the horizon would go hard.
+  // One coarse density sample per mist segment. Cheap: the segments are the
+  // gaps between cloud samples, so this is far fewer taps than the march itself,
+  // and it is read at the lowest detail because what is wanted is "is there a
+  // mass near here", not its shape.
+  float mh; vec4 mw;
+  float dens = vw_density(p, 4.0, 0.0, mh, mw);
+  float scatterers = uShaftFloor + (1.0 - uShaftFloor) * clamp(dens * uShaftDensGain, 0.0, 1.0);
+
   vec3 rad = uHazeColor * uShaft.x
-           + uSunColor * (vw_shaftPhase(cosT) * uShaft.y * shadow);
+           + uSunColor * (vw_shaftPhase(cosT) * uShaft.y * shadow * scatterers);
   // Local lights get their own gain. The mist is thin — uAerialK is a mean free
   // path of eleven kilometres — so the fraction of a lamp's light that scatters
   // toward the camera over the length of its own beam is tiny, and the honest

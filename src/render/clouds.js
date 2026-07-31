@@ -332,7 +332,14 @@ export class CloudSystem {
     // with the sim time pinned: 0.22 passes the whole mood suite, 0.5 puts 47%
     // of the frame above the blazing threshold, 1.6 puts 99.9% there. Past about
     // 0.3 it stops being light in the air and becomes a dust storm.
-    this.shaft = { mist: 1.0, sun: 0.22, phaseG: 0.58, local: 45.0, farShadow: 0.30, sigma: 0.045 };
+    // `floor` and `densGain` gate the sun's in-scatter on there being something
+    // to scatter off — see the note in vw_mist. They are what let `sun` be large
+    // enough for a beam to read without every open-sky frame turning into a dust
+    // storm, so the three are tuned together and moving one alone will not work.
+    this.shaft = {
+      mist: 1.0, sun: 0.22, phaseG: 0.58, local: 45.0, farShadow: 0.30,
+      sigma: 0.045, floor: 0.10, densGain: 14.0,
+    };
 
     /** Local light sources the march samples. Bounded, chosen per frame; see
      *  lights.js. The ship, the creatures and this class's own storms all
@@ -478,6 +485,8 @@ export class CloudSystem {
       uLightShape: { value: new THREE.Vector2(1.48, 0.16) },
       uShaft: { value: new THREE.Vector4() },
       uShaftSigma: { value: 0.045 },
+      uShaftFloor: { value: 0.10 },
+      uShaftDensGain: { value: 14.0 },
       uShaftStep: { value: new THREE.Vector4() },
       uShaftRange: { value: new THREE.Vector3() },
       uLightCount: { value: 0 },
@@ -582,6 +591,8 @@ export class CloudSystem {
     this.marchUniforms.uShaft.value.set(s.mist, s.sun, s.phaseG, s.local);
     this.marchUniforms.uShaftRange.value.set(q.shaftRange[0], q.shaftRange[1], s.farShadow);
     this.marchUniforms.uShaftSigma.value = s.sigma;
+    this.marchUniforms.uShaftFloor.value = s.floor;
+    this.marchUniforms.uShaftDensGain.value = s.densGain;
   }
 
   _ensureTargets(renderer) {
