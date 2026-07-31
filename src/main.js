@@ -18,6 +18,8 @@ import { BUDGET } from './core/perf.js';
 import { CloudSystem, CLOUD_PALETTE } from './render/clouds.js';
 import { shipLamp, thrusterPlume } from './render/lights.js';
 import { Cockpit } from './game/cockpit.js';
+import { Signature } from './game/signature.js';
+import { ShipSystems } from './game/systems.js';
 import { Flight } from './game/flight.js';
 import { ShipCamera } from './game/camera.js';
 import { Controls } from './game/controls.js';
@@ -92,6 +94,15 @@ const cockpit = new Cockpit({ clouds });
 cockpit.syncPalette(CLOUD_PALETTE);
 scene.add(cockpit.object3D);
 
+// What the ship emits, and the equipment that emits it.
+//
+// `systems` is passed the light registry so photic is read from what the
+// renderer actually drew rather than from a parallel constant — two sources of
+// truth for "how bright is the ship" is precisely how a signature system starts
+// lying to the player about the thing they are trying to manage.
+const systems = new ShipSystems({ lights: clouds.lights });
+const signature = new Signature();
+
 const input = new Input(canvas);
 const pointer = new Pointer(canvas);
 const ship = new Flight({ rng });
@@ -112,43 +123,21 @@ const shipCam = new ShipCamera(camera);
 ship.position.set(0, 700, 0);
 
 // ---------------------------------------------------------------------------
-// A placeholder scene, purely to prove the pipeline.
+// Scene lighting for solid geometry.
 //
-// Nothing here survives into the game. It exists so that a capture has something
-// unambiguous in it: if the horizon is level, the scale markers recede correctly
-// and the light falls off, then the camera, the projection, the depth buffer and
-// the tone mapping are all doing what they should.
+// The Phase-0 placeholder scene that used to live here — twelve scale-reference
+// cubes and a 20 km floor plane, marked "nothing here survives into the game" —
+// is gone. It had survived into the game: a review sweep found the cubes landing
+// in the single best-scoring frame out of 96 poses, and a floor at y=-400 put a
+// hard horizon under a world that is supposed to have no bottom.
 // ---------------------------------------------------------------------------
 const key = new THREE.DirectionalLight(0xbcd4ef, 2.2);
-// The placeholder light follows the clouds' sun, so geometry and volume agree
-// about where the light is coming from.
+// The key follows the clouds' sun, so solid geometry and the volume agree about
+// where the light is coming from. This matters now that the cockpit is real
+// geometry sitting in front of a volumetric sky.
 key.position.copy(clouds.sun);
 scene.add(key);
 scene.add(new THREE.HemisphereLight(0x9db6d6, 0x0a0f16, 0.55));
-
-const markers = new THREE.Group();
-scene.add(markers);
-{
-  // Scale references at known distances, so a capture reports whether the world
-  // is the size the numbers say it is.
-  const geo = new THREE.BoxGeometry(30, 30, 30);
-  for (let i = 1; i <= 12; i++) {
-    const d = i * 220;
-    const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
-      color: new THREE.Color().setHSL(0.58, 0.25, 0.18 + i * 0.03),
-      roughness: 0.85, metalness: 0.0,
-    }));
-    m.position.set(Math.sin(i * 1.7) * d * 0.22, Math.cos(i * 2.3) * d * 0.10 - 40, -d);
-    m.rotation.set(rng.float(), rng.float(), rng.float());
-    markers.add(m);
-  }
-  const floor = new THREE.Mesh(
-    new THREE.PlaneGeometry(20000, 20000, 1, 1),
-    new THREE.MeshStandardMaterial({ color: 0x0b1420, roughness: 1.0 }));
-  floor.rotation.x = -Math.PI / 2;
-  floor.position.y = -400;
-  scene.add(floor);
-}
 
 // ---------------------------------------------------------------------------
 // Loop
@@ -193,7 +182,18 @@ function update(dt) {
   // this frame rather than the previous one.
   cockpit.update(dt, ship, camera, controls.lightsOn);
 
-  markers.rotation.y = (state.heading += dt * 0.06) * 0.15;
+  // The player's switches drive the equipment; the equipment drives the
+  // emissions. Routed through `systems` rather than read separately by the
+  // signature, so there is exactly one answer to "is the lamp on".
+  const edges = controls.consumeEdges();
+  systems.lampOn = controls.lightsOn;
+  if (edges.scan) systems.requestScan();
+
+  // Signature updates AFTER the ship has moved and the equipment has been set,
+  // and BEFORE anything senses it — a creature reacting to last frame's
+  // emissions is a creature reacting to a position the player has already left.
+  signature.update(dt, ship, systems, loop.simTime);
+
 
   // Drive the ship's lights from where the ship actually is, before clouds.update
   // so the registry's per-frame importance sort sees this frame's positions
@@ -276,7 +276,7 @@ globalThis.GAME = {
   ship, controls, shipCam, input, pointer, pad,
   /** The light registry, so a capture can inspect what was actually lit. */
   lights: clouds.lights,
-  cockpit,
+  cockpit, systems, signature,
   stats: () => loop.perf.stats(),
   violations: () => loop.perf.violations(),
 

@@ -72,8 +72,28 @@ function finish() {
 }
 
 // --- headless suites: no GPU needed ---------------------------------------
-const controls = await import(`./controls.test.js?v=${v}`);
-render('control polarity', controls.run(), 'measured against real ship motion');
+//
+// Every suite in tests/ runs here. The runner used to import only two of the
+// four and reported "all 21 passed" while 58 further cases sat unrun, seven of
+// them red. A runner that hides suites is worse than no runner, because it
+// converts an unknown into a false assurance.
+const HEADLESS = [
+  ['./controls.test.js', 'control polarity', 'measured against real ship motion'],
+  ['./lights.test.js', 'light registry', 'packing, culling and the shadow budget'],
+  ['./creature.test.js', 'creature contract', 'transmission, attention and the state machine'],
+];
+for (const [path, title, note] of HEADLESS) {
+  try {
+    const mod = await import(`${path}?v=${v}`);
+    render(title, mod.run(), note);
+  } catch (e) {
+    const h = document.createElement('h2');
+    h.className = 'bad';
+    h.textContent = `${title} — COULD NOT RUN: ${e.message}`;
+    suites.appendChild(h);
+    fail += 1;
+  }
+}
 
 // --- suites that need the real renderer -----------------------------------
 // Driving the shipped page rather than a stand-in, so the mood suite is

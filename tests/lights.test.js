@@ -399,9 +399,12 @@ const CASES = [
   rig.update([0, 0, 0], [0, 0, -1], { throttle: 0 });
   const idle = reg.get(rig.ids.plume).on;
   rig.update([0, 0, 0], [0, 0, -1], { throttle: 0.6 });
-  const cruise = reg.get(rig.ids.plume);
+  // Snapshot, do not hold the reference. reg.get() returns the live Light, so
+  // keeping it and calling update() again compares the boosted value against
+  // itself — which reported cruise 2.40 / boost 2.40 and failed a working rig.
+  const cruise = { on: reg.get(rig.ids.plume).on, intensity: reg.get(rig.ids.plume).intensity };
   rig.update([0, 0, 0], [0, 0, -1], { throttle: 1, boost: 1 });
-  const boost = reg.get(rig.ids.plume);
+  const boost = { intensity: reg.get(rig.ids.plume).intensity };
   return {
     ok: idle === false && cruise.on === true && boost.intensity > cruise.intensity,
     got: `idle on=${idle}, cruise ${cruise.intensity.toFixed(2)}, boost ${boost.intensity.toFixed(2)}`,
