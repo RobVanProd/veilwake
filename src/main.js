@@ -16,13 +16,18 @@ import { Loop } from './core/loop.js';
 import { Rng, seedFrom } from './core/rng.js';
 import { BUDGET } from './core/perf.js';
 import { CloudSystem, CLOUD_PALETTE } from './render/clouds.js';
-import { shipLamp, thrusterPlume } from './render/lights.js';
+import { shipLamp, thrusterPlume, bioluminescence } from './render/lights.js';
 import { Cockpit } from './game/cockpit.js';
 import { Signature } from './game/signature.js';
 import { ShipSystems } from './game/systems.js';
 import { CreatureManager, Listener, createMedium, createSignatureView } from './game/creatures/index.js';
 import { Director, OUTCOME } from './game/director.js';
 import { Captions } from './ui/caption.js';
+import { CreatureRenderer } from './render/creatures.js';
+import { ListenerView } from './render/bodies/listener.view.js';
+import { LanternView } from './render/bodies/lantern.view.js';
+import { WakeHunterView } from './render/bodies/wakehunter.view.js';
+import { ChoirView } from './render/bodies/choir.view.js';
 import { Flight } from './game/flight.js';
 import { ShipCamera } from './game/camera.js';
 import { Controls } from './game/controls.js';
@@ -154,11 +159,66 @@ creatures.add(new Listener({
 // shipPos is filled in per frame rather than captured here: `ship` is declared
 // further down and reading it now is a temporal dead zone, which fails at import
 // with "Cannot access 'ship' before initialization" and takes the page with it.
+// shipPos is filled in per frame rather than captured here: `ship` is declared
+// further down and reading it now is a temporal dead zone, which fails at import
+// with "Cannot access 'ship' before initialization" and takes the page with it.
 const creatureCtx = {
   t: 0, tick: 0, shipPos: null,
   medium: creatureMedium, signature: creatureSignature,
   rng: () => rng.float(),
 };
+
+// Bodies. Until this line the creatures existed only in the simulation — a 240 m
+// Listener, a Lantern whose entire design is a light that goes out, and nothing
+// ever drawn. They are ordinary meshes in the ordinary scene, so the cloud pass
+// occludes them for free, and they are lit by the luminaries above.
+const views = new CreatureRenderer({ scene, clouds });
+views.register('Listener', (c, o) => new ListenerView(c, o));
+views.register('Lantern', (c, o) => new LanternView(c, o));
+views.register('WakeHunter', (c, o) => new WakeHunterView(c, o));
+views.register('Choir', (c, o) => new ChoirView(c, o));
+
+// Creatures that glow must light the vapour they are glowing in.
+//
+// Without this a Lantern renders as a line of bright specks: geometry that is
+// emissive to the camera and invisible to the medium. It is the difference
+// between a light and a picture of one, and for this creature it is the whole
+// point — §10.2 is built on the player choosing to approach something beautiful
+// at distance, and a light that does not touch the cloud around it is not
+// beautiful, it is a sprite.
+//
+// ONE registered light per creature rather than one per element. The march
+// affords four lights in total (MAX_MARCH_LIGHTS) and a Lantern alone has up to
+// twenty elements, so per-element registration would blow the budget on the
+// first animal. The aggregate sits at the ring's centre carrying the creature's
+// whole output, which is what the surrounding vapour would see anyway from any
+// distance at which the ring is not resolved into separate points.
+const creatureLights = new Map();
+function syncCreatureLights() {
+  for (const c of creatures.creatures) {
+    if (typeof c.emittedLumens !== 'function') continue;
+    let id = creatureLights.get(c);
+    if (id === undefined) {
+      id = clouds.lights.add(bioluminescence({ key: `creature/${c.id ?? c.archetype}` }));
+      creatureLights.set(c, id);
+    }
+    const lm = c.emittedLumens();
+    clouds.lights.set(id, {
+      on: !c.dormant && lm > 1,
+      // Back to the registry's radiance scale from lumens.
+      //
+      // NOT the ship lamp's 1800 lm-per-unit, and the difference is the cone.
+      // The lamp puts 9000 lm through a 17-degree spot, so its radiance along
+      // the axis is high; a bioluminescent creature radiates the same order of
+      // lumens over the whole sphere, and handing that number to an omni light
+      // at the lamp's ratio floods everything. Measured at 40000 lm through the
+      // lamp's constant, the clamp pinned it at 9 and the frame's blown fraction
+      // went from 7.3 to 20.9 percent — the whole canopy washed cyan.
+      intensity: Math.min(lm / 22000, 1.5),
+      position: [c.position.x, c.position.y, c.position.z],
+    });
+  }
+}
 
 const input = new Input(canvas);
 const pointer = new Pointer(canvas);
@@ -195,21 +255,67 @@ captions.onRetry = () => {
 ship.position.set(0, 700, 0);
 
 // ---------------------------------------------------------------------------
-// Scene lighting for solid geometry.
+// Scene lighting for solid geometry — driven by the luminaries.
 //
 // The Phase-0 placeholder scene that used to live here — twelve scale-reference
 // cubes and a 20 km floor plane, marked "nothing here survives into the game" —
 // is gone. It had survived into the game: a review sweep found the cubes landing
 // in the single best-scoring frame out of 96 poses, and a floor at y=-400 put a
 // hard horizon under a world that is supposed to have no bottom.
+//
+// One directional light per luminary, updated every frame from sky.js. This
+// replaces a single static key that pointed at `clouds.sun`, and the difference
+// is the whole point of having luminaries: solid geometry — the cockpit, and now
+// the creatures — is lit by whatever is actually up, so a Listener under the
+// ember is a different-looking animal from the same Listener under the veil, and
+// nothing about that is arranged by hand. A static key would have left every
+// body lit from a direction the sky disagreed with, which is the single most
+// reliable way to make a rendered world look fake.
 // ---------------------------------------------------------------------------
-const key = new THREE.DirectionalLight(0xbcd4ef, 2.2);
-// The key follows the clouds' sun, so solid geometry and the volume agree about
-// where the light is coming from. This matters now that the cockpit is real
-// geometry sitting in front of a volumetric sky.
-key.position.copy(clouds.sun);
-scene.add(key);
-scene.add(new THREE.HemisphereLight(0x9db6d6, 0x0a0f16, 0.55));
+const skyLights = clouds.sky.lights.map(() => {
+  const d = new THREE.DirectionalLight(0xffffff, 0);
+  scene.add(d);
+  return d;
+});
+const ambient = new THREE.HemisphereLight(0x9db6d6, 0x0a0f16, 0.55);
+scene.add(ambient);
+
+/**
+ * Radiance-to-light gain for solid geometry.
+ *
+ * The luminaries' intensities are in CLOUD_PALETTE's arbitrary radiance scale,
+ * which the volumetric march interprets through its own scattering integral.
+ * Three's lights are not that integral, so handing them the raw number leaves
+ * every solid surface at a few percent of where it should be — measured, a
+ * 240 m Listener came out at a mean of 28 against a background of 94 with barely
+ * any internal tone, which is the flat black cut-out an adversarial pass
+ * correctly complained about.
+ *
+ * At 5 the body has real shading (internal range 131 -> 155) and is still
+ * unmistakably darker than the cloud behind it, which is the relationship the
+ * art direction wants: carried by silhouette, but not a hole in the frame.
+ */
+const SCENE_LIGHT_GAIN = 5.0;
+
+/** Push the current luminaries into the scene's own lights. */
+function syncSceneLights() {
+  const ls = clouds.sky.lights;
+  for (let i = 0; i < skyLights.length; i++) {
+    const L = ls[i], d = skyLights[i];
+    // Three's DirectionalLight shines from `position` toward `target`, and the
+    // luminary's `dir` points TOWARD the light, so the position is simply that
+    // direction pushed far out.
+    d.position.set(L.dir.x * 1000, L.dir.y * 1000, L.dir.z * 1000);
+    d.color.setRGB(L.color.x, L.color.y, L.color.z);
+    d.intensity = L.intensity * SCENE_LIGHT_GAIN;
+  }
+  // Ambient follows the sky it is standing in for.
+  const a = clouds.sky.ambientTop, b = clouds.sky.ambientBottom;
+  ambient.color.setRGB(a.x, a.y, a.z);
+  ambient.groundColor.setRGB(b.x, b.y, b.z);
+  ambient.intensity = 3.2;
+}
+syncSceneLights();
 
 // ---------------------------------------------------------------------------
 // Loop
@@ -274,6 +380,11 @@ function update(dt) {
   creatureCtx.tick = loop.tick;
   creatureCtx.shipPos = ship.position;
   creatures.update(dt, loop.tick, creatureCtx);
+  // Bodies follow the simulation, and the scene's lights follow the sky, so a
+  // creature is lit by whatever luminary is actually up this frame.
+  syncSceneLights();
+  views.sync(creatures, dt, camera, { simTime: loop.simTime });
+  syncCreatureLights();
 
   // The director reads the frame everything else just produced, so a beat can
   // advance on the same step the player earned it rather than one behind.
@@ -377,7 +488,7 @@ globalThis.GAME = {
   ship, controls, shipCam, input, pointer, pad,
   /** The light registry, so a capture can inspect what was actually lit. */
   lights: clouds.lights,
-  cockpit, systems, signature, creatures, director, captions,
+  cockpit, systems, signature, creatures, director, captions, views,
   /** Where the ship was `ageSec` ago — the sound source, not the ship. */
   shipPositionAt,
   stats: () => loop.perf.stats(),
