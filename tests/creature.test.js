@@ -377,9 +377,26 @@ test('§5.3 two creatures forked from one parent do not share a mistake sequence
   for (let i = 0; i < 2000; i++) {
     if (!!a.rollFalsePositive(0, 0, 0.1, 'acoustic') === !!b.rollFalsePositive(0, 0, 0.1, 'acoustic')) same++;
   }
-  // Independent streams agree by chance about 50% of the time; a shared stream
-  // agrees 100% of the time.
-  return { ok: same < 1800, detail: `${same}/2000 draws agreed (identical streams would be 2000)` };
+  // The bound this shipped with was `same < 1800`, justified by "independent
+  // streams agree by chance about 50% of the time". True of a coin, false of this
+  // experiment — which makes it the guessed constant HANDOFF.md's standing
+  // discipline warns about, committed in a test rather than in a module. Each
+  // draw is a rare event, not a coin flip: the rate is
+  // falsePositiveBase · (1 + mediumFactor) · SENSE_DT = 0.5 · 1 · 0.1 = 0.05, so
+  // two INDEPENDENT streams agree whenever both fire or neither does —
+  // 0.05² + 0.95² = 90.5%, about 1810 of 2000 with a standard deviation near 13.
+  // The old bound sat below the expected value of a passing run and could never
+  // be met by correct code.
+  const p = 0.5 * SENSE_DT;
+  const expected = 2000 * (p * p + (1 - p) * (1 - p));
+  // 1900 is seven standard deviations above that expectation and a hundred draws
+  // clear of the 2000 a shared stream would produce; the lower bound catches a
+  // stream that has stopped producing variety at all.
+  return {
+    ok: same < 1900 && same > 1700,
+    detail: `${same}/2000 draws agreed; independent streams predict ${f(expected, 0)} ` +
+      `at p=${p}, a shared stream would give 2000`,
+  };
 });
 
 // ---------------------------------------------------------------------------
@@ -540,21 +557,40 @@ test('§5.2 the propagation delay is observable: heard for something done 9 s ag
   const base = l.onPercept.bind(l);
   l.onPercept = (p, c) => { heard.push({ t: c.t, emitted: p.emitted, age: p.ageSec }); base(p, c); };
 
+  // HOLD THE GEOMETRY STILL. This is the instrument, not the subject, and getting
+  // it wrong here produced a result that looked exactly like a bug in the
+  // transmission model: the creature was left free to patrol for the 100 s before
+  // the burst, closed 300 m in that time, and so the true delay when the sound
+  // arrived was 8.20 s — while the assertion was still computing 9.09 s from the
+  // distance it started at. It reported the burst arriving 0.59 s EARLY, and
+  // hearing something before the sound could reach you is precisely the kind of
+  // impossible result that sends the next person off to rewrite correct code.
+  // controls.test.js records the same lesson in its own header.
+  const held = vec(l.position.x, l.position.y, l.position.z);
+  const shipPos = vec(0, 200, 3000);
+  const D = vdist(held, shipPos);
+
   scriptedWorld({
     seconds: 118, creatures: [l], medium: clear,
-    shipPosAt: () => vec(0, 200, 3000),
+    shipPosAt: () => shipPos,
     // A 70 dB burst for two seconds on top of a 46 dB cruise floor.
     acousticAt: (t) => (t >= 100 && t < 102 ? 70 : 46),
+    onStep: () => { l.position.x = held.x; l.position.y = held.y; l.position.z = held.z; },
   });
 
   const burst = heard.filter((h) => h.emitted > 60);
   const first = burst.length ? burst[0].t : null;
-  const expect = 100 + soundDelayS(3000);
+  const expect = 100 + soundDelayS(D);
+  // Late is expected and honest — the recorder buckets at 2 Hz and the sense tick
+  // is 0.1 s, so the burst cannot be noticed before the first bucket boundary past
+  // its arrival. Early would mean hearing something before it happened, so the
+  // window is deliberately asymmetric.
   return {
-    ok: first !== null && near(first, expect, 0.6) && near(burst[0].age, soundDelayS(3000), 0.2),
+    ok: first !== null && first >= expect - 0.05 && first <= expect + 0.7
+        && near(burst[0].age, soundDelayS(D), 0.3),
     detail: first === null ? 'the burst was never heard'
       : `emitted at t=100.0, first heard at t=${f(first, 2)} — a ${f(first - 100, 2)} s lag ` +
-        `(soundDelay 3 km = ${f(soundDelayS(3000), 2)} s)`,
+        `at ${f(D, 0)} m (soundDelay ${f(soundDelayS(D), 2)} s); percept age ${f(burst[0].age, 2)} s`,
   };
 });
 
@@ -879,7 +915,18 @@ test('§12 the same seed and the same inputs reproduce the detection log exactly
     mgr.add(l);
     scriptedWorld({
       seconds: 240, creatures: [l], medium: createMedium(makeSource()), manager: mgr,
-      shipPosAt: (t) => vec(Math.sin(t * 0.05) * 1500, 200, 2200 + Math.cos(t * 0.03) * 900),
+      // Close enough to actually be heard. The path this shipped with orbited
+      // 2200–3100 m through a medium whose mean density is 0.5, which is 13–23 dB
+      // of absorption on top of the spreading term: measured across the whole
+      // 240 s the received level peaked at 15.73 dB(V) against a 16 dB threshold,
+      // so the creature was correctly deaf for the entire run and `log.length > 0`
+      // could never be true. A determinism case with nothing to compare passes
+      // vacuously in one direction and fails permanently in the other; either way
+      // it is not measuring replay. Halving the radii puts the ship between about
+      // 700 m and 1500 m, which spans the threshold rather than sitting under it —
+      // so the log now holds escalation *and* de-escalation, which is a stronger
+      // thing to replay than a constant detection would have been.
+      shipPosAt: (t) => vec(Math.sin(t * 0.05) * 700, 200, 1100 + Math.cos(t * 0.03) * 400),
       acousticAt: (t) => (t % 60 < 20 ? 18 : 46),
     });
     return { log: mgr.detectionLog(), l };
