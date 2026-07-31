@@ -327,17 +327,30 @@ export class CloudSystem {
     // cloud body's uSigmaT. See the note at the shadow term in cloud.glsl.js:
     // the body wants to be opaque and the shaft wants to be graded, and sharing
     // one coefficient means raising the first silently deletes the second.
-    // `sun` is the gain on direct sunlight scattered by the mist between clouds,
-    // and it is far more sensitive than it looks. Swept at the gameplay camera
-    // with the sim time pinned: 0.22 passes the whole mood suite, 0.5 puts 47%
-    // of the frame above the blazing threshold, 1.6 puts 99.9% there. Past about
-    // 0.3 it stops being light in the air and becomes a dust storm.
+    // `sun` is the gain on direct sunlight scattered by the mist between clouds.
+    //
+    // It was 0.22, and it had to be, because before the density gate the mist
+    // integrated through empty air as readily as through vapour: 0.5 put 47% of
+    // the frame above the blazing threshold and 1.6 put 99.9% there. Anything
+    // strong enough to make a beam visible beside a cloud turned every open-sky
+    // frame into a dust storm.
+    //
+    // With the gate, empty air scatters almost nothing and the gain is free.
+    // Swept against the full mood suite through the real gameplay camera, all of
+    // these pass 7/7, and the frame gets BETTER as it rises because the shafts
+    // are what separate light from shadow:
+    //   0.22 -> p50 31, 6.1% blazing, hue separation -2.1  (inverted!)
+    //   3.0  -> p50 61, 11.4%,        separation 12.3
+    //   5.0  -> p50 63, 20.9%,        separation 15.0
+    //   8.0  -> p50 75, 31.1%,        separation 16.4  (nearing the blaze ceiling)
+    // Twenty-three times the old value, and the reason the old value looked
+    // correct is that it was the largest number the ungated term could survive.
     // `floor` and `densGain` gate the sun's in-scatter on there being something
     // to scatter off — see the note in vw_mist. They are what let `sun` be large
     // enough for a beam to read without every open-sky frame turning into a dust
     // storm, so the three are tuned together and moving one alone will not work.
     this.shaft = {
-      mist: 1.0, sun: 0.22, phaseG: 0.58, local: 45.0, farShadow: 0.30,
+      mist: 1.0, sun: 5.0, phaseG: 0.58, local: 45.0, farShadow: 0.30,
       sigma: 0.045, floor: 0.10, densGain: 14.0,
     };
 
