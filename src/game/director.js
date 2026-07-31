@@ -30,7 +30,7 @@
 // who is told what to press has been given a task; one who is told what is true
 // has been given a situation.
 
-import { STATE, STATE_ORDER } from './creatures/index.js';
+import { STATE, STATE_ORDER, Listener, Lantern, WakeHunter, Choir } from './creatures/index.js';
 
 const rank = (s) => STATE_ORDER.indexOf(s);
 
@@ -88,10 +88,18 @@ export const BEATS = [
       g.placeTraceAhead(3200);
       g.markDistance();
       g.setCreatureEnabled(false);
+      // A Lantern, far off to one side. §10.2 calls it "a beautiful thing at
+      // distance, worth approaching — this is beat 2 of the session", and
+      // GAME_VISION's second beat is Curiosity: something legible and
+      // interesting at range that is worth a deviation. It is the first
+      // creature the player ever sees and it is the one that is lovely, which
+      // is what makes the dimming land later.
+      g.spawn('Lantern', 4200, -2600, { dy: 120 });
     },
     say: [
       { at: 0.0, text: 'the cloud ahead is wrong' },
       { at: 4.0, text: 'SOMETHING CAME THROUGH HERE' },
+      { at: 9.0, text: 'there are lights out to port' },
     ],
     // Either you reach it, or you have flown far enough that you would have
     // passed it. The trace is placed along the heading at the moment the beat
@@ -182,6 +190,14 @@ export const BEATS = [
     // head start on attention, because by now the player knows the rules and the
     // beat is about pressure rather than teaching.
     enter(g) {
+      // A Wake Hunter pack, and this beat exists to invert what the last two
+      // taught. Everything up to here rewards going quiet and staying put;
+      // §10.3's line is "against the Wake Hunter, running is what gets you
+      // caught", because speed is what writes the trail it follows. Meeting it
+      // immediately after learning to hide is the point.
+      for (let i = 0; i < 4; i++) {
+        g.spawn('WakeHunter', 900 + i * 120, -300 + i * 190, { dy: -40 + i * 25 });
+      }
       g.setCreatureEnabled(true);
       g.placeCreatureAhead(700, 180);
       // Near the top of the ladder on arrival. Measured, one close pass at a
@@ -220,10 +236,20 @@ export const BEATS = [
     key: 'break',
     title: 'THE BREAK',
     minSeconds: 6,
-    enter(g) { g.markDistance(); g.setCreatureEnabled(false); },
+    enter(g) {
+      g.markDistance();
+      g.setCreatureEnabled(false);
+      // A Choir on the way out. It never hunts and never commits — it repeats
+      // what it has heard, and its echoes draw other creatures to somewhere you
+      // are not. Placed last because §10.4's payoff is a player who has already
+      // learned the other three well enough to notice that something is
+      // imitating them.
+      g.spawn('Choir', 3800, 1500, { dy: 60 });
+    },
     say: [
       { at: 0.0, text: 'it has lost you' },
       { at: 5.0, text: 'there is a thinning ahead' },
+      { at: 11.0, text: 'something out there is repeating your engine note' },
     ],
     done: (g) => g.distanceSinceMark() > 7000,
     ending: OUTCOME.ESCAPED,
@@ -275,6 +301,10 @@ export class Director {
     this._trace = null;
     this._closeFor = 0;
     this.attempts = 0;
+    /** Creatures this beat put in the world; cleared when it ends. */
+    this._spawned = [];
+    /** The animal the current beat is about. */
+    this._focus = null;
 
     /** Anything that wants to react to a beat change without polling. */
     this.onBeat = null;
@@ -293,8 +323,45 @@ export class Director {
     return Math.hypot(p.x - m.x, p.y - m.y, p.z - m.z);
   }
 
-  /** The one creature the slice uses. */
-  _c() { return this.creatures.creatures[0] || null; }
+  /**
+   * The creature currently driving the beat.
+   *
+   * The slice used to run on `creatures[0]` and spawn nothing else, so a player
+   * met exactly one archetype out of four — the other three were fully
+   * simulated, tested, and never encountered. `_focus` is whichever animal the
+   * current beat is about; everything else in the world carries on regardless.
+   */
+  _c() { return this._focus || this.creatures.creatures[0] || null; }
+
+  /**
+   * Put an archetype in the world, `d` metres along the heading and `side` across.
+   *
+   * @param {'Listener'|'Lantern'|'WakeHunter'|'Choir'} kind
+   */
+  spawn(kind, d, side = 0, opts = {}) {
+    const p = this.ship.position, f = this.ship.forward;
+    const rx = -f.z, rz = f.x;
+    const rl = Math.hypot(rx, rz) || 1;
+    const at = {
+      x: p.x + f.x * d + (rx / rl) * side,
+      y: Math.max(240, p.y + (opts.dy ?? 0)),
+      z: p.z + f.z * d + (rz / rl) * side,
+    };
+    const seed = (this.rng ? Math.floor(this.rng() * 1e9) : 1) | 0;
+    const Ctor = { Listener, Lantern, WakeHunter, Choir }[kind];
+    if (!Ctor) return null;
+    const c = new Ctor({ position: at, seed, ...opts });
+    this.creatures.add(c);
+    this._spawned.push(c);
+    return c;
+  }
+
+  /** Everything this beat put in the world goes dormant when the beat ends. */
+  _clearSpawned() {
+    for (const c of this._spawned) c.dormant = true;
+    this._spawned.length = 0;
+    this._focus = null;
+  }
   creatureState() { const c = this._c(); return c ? c.state : STATE.UNAWARE; }
   creatureRange() {
     const c = this._c(); if (!c) return Infinity;
@@ -365,6 +432,11 @@ export class Director {
     this.beatTime = 0;
     this._said.clear();
     this._closeFor = 0;
+    // Whatever the previous beat put in the world goes dormant. Without this the
+    // world accumulates every creature every beat ever spawned, and by the end a
+    // player is being hunted by four packs at once — which is not difficulty, it
+    // is noise, and §6's one-COMMITTED rule cannot make it readable.
+    this._clearSpawned();
     const b = this.beat;
     if (b && b.enter) b.enter(this);
     if (this.onBeat) this.onBeat(b, this.index);
