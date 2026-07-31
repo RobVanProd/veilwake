@@ -17,49 +17,94 @@
     font: 13px/1.7 ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
   }
   h1 { font-size: 15px; letter-spacing: .26em; color: #e6f0fb; margin: 0 0 2px; font-weight: 500; }
+  h2 { font-size: 12px; letter-spacing: .18em; color: #7e93ab; margin: 22px 0 6px; font-weight: 500; text-transform: uppercase; }
   .sub { color: #6f8299; margin-bottom: 20px; }
-  #summary { font-size: 14px; margin-bottom: 16px; }
-  .ok { color: #8fe3a8; } .bad { color: #ff8b8b; } .dim { color: #55677e; }
-  table { border-collapse: collapse; max-width: 760px; width: 100%; }
+  #summary { font-size: 14px; margin-bottom: 6px; }
+  .ok { color: #8fe3a8; } .bad { color: #ff8b8b; } .dim { color: #55677e; } .wait { color: #ffd08a; }
+  table { border-collapse: collapse; max-width: 900px; width: 100%; }
   td { padding: 3px 10px 3px 0; vertical-align: top; border-bottom: 1px solid #121b26; }
   td.v { width: 52px; }
   td.n { color: #cfe2f5; }
   td.d { color: #55677e; text-align: right; white-space: nowrap; }
+  /* The game runs for real, off-screen. A fake renderer would drift from the
+     shipped one and the mood suite would slowly stop meaning anything. */
+  #rig { position: fixed; left: -3000px; top: 0; width: 960px; height: 540px; border: 0; }
 </style>
 </head>
 <body>
 <h1>VEILWAKE</h1>
-<div class="sub">control polarity — every input measured against real ship motion</div>
-<div id="summary" class="dim">running…</div>
-<table id="rows"></table>
+<div class="sub">control polarity, and the art direction as a regression test</div>
+<div id="summary" class="wait">running…</div>
+<div id="suites"></div>
+
+<iframe id="rig" src="../index.html" title="game under test"></iframe>
 
 <script type="module">
-// Cache-busted so a run always reflects what is on disk. Without this the
-// browser happily serves the module graph from before the last edit, which
-// once made a fixed bug look unfixed.
 const v = Date.now();
-const T = await import(`./controls.test.js?v=${v}&bust=${v}`);
+const summary = document.getElementById('summary');
+const suites = document.getElementById('suites');
+let pass = 0, fail = 0;
 
-const r = T.run();
-const sum = document.getElementById('summary');
-sum.className = r.fail.length ? 'bad' : 'ok';
-sum.textContent = r.fail.length
-  ? `${r.fail.length} FAILED — ${r.pass}/${r.results.length} passed`
-  : `all ${r.pass} passed`;
-
-const rows = document.getElementById('rows');
-for (const x of r.results) {
-  const tr = document.createElement('tr');
-  const n = (q) => (typeof q === 'number' ? q.toFixed(3) : q);
-  tr.innerHTML =
-    `<td class="v ${x.ok ? 'ok' : 'bad'}">${x.ok ? 'pass' : 'FAIL'}</td>` +
-    `<td class="n">${x.name}</td>` +
-    `<td class="${x.ok ? 'dim' : 'bad'}">${x.ok ? x.got : `wanted ${x.want}, got ${x.got}`}</td>` +
-    `<td class="d">turn ${n(x.detail.sideways)} · nose ${n(x.detail.vertical)} · wing ${n(x.detail.wing)}</td>`;
-  rows.appendChild(tr);
+function render(title, r, note) {
+  pass += r.pass; fail += r.fail.length;
+  const h = document.createElement('h2');
+  h.textContent = title + (note ? ` — ${note}` : '');
+  suites.appendChild(h);
+  const table = document.createElement('table');
+  for (const x of r.results) {
+    const tr = document.createElement('tr');
+    const detail = x.detail
+      ? `turn ${(+x.detail.sideways).toFixed(3)} · nose ${(+x.detail.vertical).toFixed(3)} · wing ${(+x.detail.wing).toFixed(3)}`
+      : (x.want ? `want ${x.want}` : '');
+    tr.innerHTML =
+      `<td class="v ${x.ok ? 'ok' : 'bad'}">${x.ok ? 'pass' : 'FAIL'}</td>` +
+      `<td class="n">${x.name}</td>` +
+      `<td class="${x.ok ? 'dim' : 'bad'}">${x.ok ? x.got ?? x.want ?? '' : `wanted ${x.want}, got ${x.got}`}</td>` +
+      `<td class="d">${detail}</td>`;
+    table.appendChild(tr);
+  }
+  suites.appendChild(table);
 }
 
-globalThis.TESTS = r;
+function finish() {
+  summary.className = fail ? 'bad' : 'ok';
+  summary.textContent = fail ? `${fail} FAILED — ${pass} passed` : `all ${pass} passed`;
+}
+
+// --- headless suites: no GPU needed ---------------------------------------
+const controls = await import(`./controls.test.js?v=${v}`);
+render('control polarity', controls.run(), 'measured against real ship motion');
+
+// --- suites that need the real renderer -----------------------------------
+// Driving the shipped page rather than a stand-in, so the mood suite is
+// measuring the game the player gets.
+const rig = document.getElementById('rig');
+try {
+  // Polled rather than waiting on `load`. Two races otherwise: the iframe can
+  // finish loading before this listener is attached, in which case the event
+  // never fires; and `load` means the document parsed, not that the module which
+  // defines GAME has run. Polling is immune to both.
+  const GAME = await (async () => {
+    const deadline = performance.now() + 25000;
+    for (;;) {
+      const g = rig.contentWindow && rig.contentWindow.GAME;
+      if (g) { await g.ready; return g; }
+      if (performance.now() > deadline) throw new Error('game did not boot within 25 s');
+      await new Promise((r) => setTimeout(r, 120));
+    }
+  })();
+  const mood = await import(`./mood.test.js?v=${v}`);
+  render('art direction', mood.run(GAME), 'dark, cold, and blazing where it should be');
+} catch (e) {
+  const h = document.createElement('h2');
+  h.className = 'bad';
+  h.textContent = `art direction — COULD NOT RUN: ${e.message}`;
+  suites.appendChild(h);
+  fail += 1;
+}
+
+finish();
+globalThis.TESTS = { pass, fail };
 </script>
 </body>
 </html>
