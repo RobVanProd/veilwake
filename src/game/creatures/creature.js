@@ -313,8 +313,18 @@ export function createFlatMedium({ density = 0, turbulence = 0, charge = 0, duct
  * percept, which travels into the detection log. A log line that admits its own
  * path was approximated is worth more than one that quietly is.
  *
- * Accepted shapes, in order: `sampleAt(t)`, `at(t)`, `historyAt(t)`, a bare
- * function, or a live object read as "now".
+ * Accepted shapes, in order: `sampleAt(age)`, `at(age)`, `historyAt(age)`, a
+ * bare function, or a live object read as "now".
+ *
+ * **The argument is an AGE IN SECONDS, not an absolute sim time.** This used to
+ * be documented as an absolute time while the only history implementation in the
+ * project — `SignatureRecorder.at(ageSec)` — took an age, and the two are mirror
+ * images about the present. Measured: at t=60 s, `sampleAt(50.91)` (the absolute
+ * time a 3 km listener should read) returned the sample from simTime 9.0, 42 s
+ * wrong; and past t=300 s the absolute form returned null at every distance,
+ * because the recorder rejects an age older than its buffer. A Listener wired to
+ * the old docstring was scrambled for five minutes and then silently deaf
+ * forever. One convention, stated here, and it is the age.
  */
 export function createSignatureView(source) {
   const pick = (o) => (typeof o?.sampleAt === 'function' ? o.sampleAt.bind(o)
@@ -344,10 +354,14 @@ export function createSignatureView(source) {
 
   return {
     hasHistory: !!history,
-    /** What the ship was emitting at `t`, and where it was. Null before the log starts. */
-    sampleAt(t, fallbackPos) {
+    /**
+     * What the ship was emitting `ageSec` ago, and where it was. Null once the
+     * age runs off the end of the recorder — never the present pretending to be
+     * the past, which §7 rates as the worst bug this project can have.
+     */
+    sampleAt(ageSec, fallbackPos) {
       if (!history) return norm(live(), fallbackPos, false);
-      return norm(history(t), fallbackPos, true);
+      return norm(history(ageSec), fallbackPos, true);
     },
     /** Emissions right now. Contact channels only — everything else travels. */
     current(fallbackPos) {
@@ -609,6 +623,24 @@ export class Creature {
         // §6: something that has committed and lost you does not politely resume
         // tracking, it starts hunting the area.
         const down = this.state === STATE.COMMITTED ? STATE.SEARCHING : STATE_ORDER[i - 1];
+        if (down === STATE.SEARCHING && this.state === STATE.COMMITTED) {
+          // And the attention has to come down with it, or the rule is decorative.
+          // COMMITTED exits at 0.736 and TRACKING is entered at 0.70 — the two
+          // lines are 0.036 apart, which at the Listener's 0.012/s decay is three
+          // seconds. Dropping to SEARCHING and leaving attention where it was put
+          // the creature straight back into TRACKING on the next pass of this
+          // loop: measured, the whole band [0.700, 0.735] mis-landed in TRACKING,
+          // and that is exactly the band a decaying creature must pass through,
+          // so it fired every time. The observable transition was COMMITTED→
+          // TRACKING, which §6 forbids by name.
+          //
+          // 0.56 is not a new number: it is stateExit(TRACKING), the level at
+          // which TRACKING would itself give up. Landing there puts the creature
+          // in the middle of the SEARCHING band rather than on its edge, so
+          // climbing back to TRACKING costs a real re-detection (0.14 of
+          // attention) and decaying out of SEARCHING costs 16.7 s.
+          this.attention = Math.min(this.attention, stateExit(STATE.TRACKING));
+        }
         this._transition(down, ctx, null);
         continue;
       }

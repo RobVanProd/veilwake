@@ -176,7 +176,28 @@ export class LightRegistry {
   }
 
   get(id) { return this.lights.get(id); }
-  remove(id) { return this.lights.delete(id); }
+
+  /**
+   * Drop a light, and drop it from this frame's set too.
+   *
+   * The splice is the whole point. Deleting from the map alone left the light in
+   * `active`, so a light removed between `prepare()` and `writeUniforms()` was
+   * still packed and still drawn: measured, add → prepare → remove →
+   * writeUniforms reported `registered: 0` and `uLightCount: 1`. Harmless on
+   * today's call order, which runs the two back to back — and not harmless at
+   * all the moment creatures despawn on their own schedule, because a dead
+   * creature's lantern would flash for one frame at its last position. A false
+   * "something is there" is the worst possible bug in a game whose entire dread
+   * mechanic is inference from partial light.
+   */
+  remove(id) {
+    const l = this.lights.get(id);
+    if (l) {
+      const i = this.active.indexOf(l);
+      if (i >= 0) this.active.splice(i, 1);
+    }
+    return this.lights.delete(id);
+  }
   clear() { this.lights.clear(); this.active.length = 0; return this; }
 
   /**
