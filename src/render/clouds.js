@@ -104,13 +104,13 @@ const WIND = {
  */
 export const CLOUD_QUALITY = {
   low:    { scale: 0.42, steps: 120, lightSteps: 3,  msOctaves: 2, maxDist: 15000, minStep: 26, growth: 0.055, maxStep: 240, coarseMin: 110, coarseMax: 260, tauCap: 0.45, softK: 0.0044, detailFade: [200, 800],
-            shaftSteps: 5, shadowTaps: 2, shaftStride: [200, 0.080], shaftReach: [120, 2.35], shaftRange: [900, 2200] },
+            shaftSteps: 4, shadowTaps: 2, shaftStride: [200, 0.080], shaftReach: [180, 3.20], shaftRange: [900, 2200] },
   medium: { scale: 0.50, steps: 176, lightSteps: 5,  msOctaves: 3, maxDist: 19000, minStep: 19, growth: 0.040, maxStep: 175, coarseMin: 80,  coarseMax: 220, tauCap: 0.34, softK: 0.0036, detailFade: [350, 1300],
-            shaftSteps: 7, shadowTaps: 3, shaftStride: [120, 0.060], shaftReach: [72,  1.95], shaftRange: [1200, 3000] },
-  high:   { scale: 0.50, steps: 256, lightSteps: 9,  msOctaves: 3, maxDist: 24000, minStep: 13, growth: 0.030, maxStep: 130, coarseMin: 55,  coarseMax: 175, tauCap: 0.24, softK: 0.0030, detailFade: [500, 2000],
-            shaftSteps: 9, shadowTaps: 3, shaftStride: [68,  0.045], shaftReach: [45,  1.72], shaftRange: [1600, 4000] },
-  ultra:  { scale: 0.66, steps: 384, lightSteps: 11, msOctaves: 3, maxDist: 30000, minStep: 9,  growth: 0.022, maxStep: 95,  coarseMin: 36,  coarseMax: 130, tauCap: 0.20, softK: 0.0024, detailFade: [800, 3200],
-            shaftSteps: 11, shadowTaps: 4, shaftStride: [52, 0.035], shaftReach: [40,  1.58], shaftRange: [2000, 5000] },
+            shaftSteps: 6, shadowTaps: 3, shaftStride: [120, 0.060], shaftReach: [110, 2.10], shaftRange: [1200, 3000] },
+  high:   { scale: 0.50, steps: 256, lightSteps: 8,  msOctaves: 3, maxDist: 24000, minStep: 13, growth: 0.030, maxStep: 130, coarseMin: 55,  coarseMax: 175, tauCap: 0.24, softK: 0.0030, detailFade: [500, 2000],
+            shaftSteps: 7, shadowTaps: 3, shaftStride: [68,  0.045], shaftReach: [78,  1.95], shaftRange: [1600, 4000] },
+  ultra:  { scale: 0.66, steps: 384, lightSteps: 10, msOctaves: 3, maxDist: 30000, minStep: 9,  growth: 0.022, maxStep: 95,  coarseMin: 36,  coarseMax: 130, tauCap: 0.20, softK: 0.0024, detailFade: [800, 3200],
+            shaftSteps: 9, shadowTaps: 4, shaftStride: [52, 0.035], shaftReach: [45,  1.72], shaftRange: [2000, 5000] },
 };
 
 /**
@@ -123,25 +123,60 @@ export const CLOUD_QUALITY = {
  * Hue does the work that saturation would do badly.
  */
 export const CLOUD_PALETTE = {
-  // A low amber sun. Warmer and stronger than looks sensible as a number,
-  // because almost all of it is removed again by the extinction between the
-  // surface of a cloud and the point being shaded.
-  sun: [3.20, 1.86, 0.92],
+  // A pale, barely-warm key. It used to be [3.20, 1.86, 0.92] — a low amber sun
+  // — and that single line was most of why the game looked like a holiday.
+  //
+  // Amber plus a lit cloud is cream, and cream at this coverage filled a quarter
+  // of the frame. Measured at the reference pose: 25.5% of pixels above the
+  // "blazing" threshold, with p95 221 / p99 229 / p999 232 — the bright end was a
+  // *plateau*, not a spike, so nothing read as a highlight because everything
+  // was one. Warmth is not deleted, only rationed: what survives here is the
+  // last of it, and it lands on cloud edges as bone rather than gold.
+  sun: [2.55, 2.20, 1.55],
   // Sky light into the top of the layer, and the dim green-blue that comes back
   // off whatever is underneath it. These are what a shadowed face is made of, so
-  // this is where the cold half of the palette has to live.
-  ambientTop: [0.075, 0.205, 0.400],
-  ambientBottom: [0.010, 0.030, 0.042],
+  // this is where the cold half of the palette has to live. Cut hard — a shadow
+  // that is only slightly darker than the light is what makes a frame read as
+  // overcast rather than as menacing.
+  ambientTop: [0.028, 0.062, 0.120],
+  ambientBottom: [0.004, 0.009, 0.014],
   // Light that has bounced several times has lost the sun's warmth to the blue
   // around it. Above 1.0 in blue on purpose: it should read as a colour, not as
   // a darker version of the sun.
-  deepTint: [0.30, 0.58, 1.15],
-  haze: [0.062, 0.104, 0.152],
-  skyZenith: [0.006, 0.020, 0.068],
-  skyHorizon: [0.070, 0.122, 0.180],
-  skyGround: [0.013, 0.026, 0.034],
+  deepTint: [0.26, 0.46, 0.88],
+  haze: [0.022, 0.030, 0.040],
+  // The sky is now nearly black at the zenith and only just present at the
+  // horizon. This is the single largest contributor to dread in the frame: a
+  // cloud is only monumental if the thing behind it is empty.
+  skyZenith: [0.003, 0.006, 0.014],
+  skyHorizon: [0.026, 0.038, 0.050],
+  skyGround: [0.008, 0.015, 0.021],
+  // The two warm things left in the world, and both mean danger. With the key
+  // desaturated, an ember is now the only saturated warmth on screen — which is
+  // the point. Warmth became information.
   stormFlash: [0.66, 0.78, 1.00],
   stormEmber: [1.00, 0.36, 0.10],
+};
+
+/**
+ * How dark the world is, as one number.
+ *
+ * Kept beside the palette because it is not a rendering detail — it is the
+ * difference between weather and dread, and it is the first thing anyone
+ * retuning the look will want. tools/mood.js measures whether a change actually
+ * moved it; do not adjust these by eye.
+ */
+export const MOOD_TARGET = {
+  /** Median luminance, 0–255. Above ~70 the frame reads as daylight. */
+  p50: [15, 70],
+  /** p99 / p50 — "shafts in a dark room". Below 3 the frame is flat. */
+  dynamic: 3.0,
+  /** Percent of frame genuinely blazing. Zero is not doom, it is off. */
+  litFrac: [0.8, 25],
+  /** mean(R) - mean(B). Negative is cold, which is the world's default. */
+  warmth: 2,
+  /** Light warmer than shadow. Negative inverts the palette's whole intent. */
+  coldShadowSep: 4,
 };
 
 const TAU = 6.28318530718;
@@ -189,7 +224,11 @@ export class CloudSystem {
     // and produces a postcard; a low one puts the light behind the forms, which
     // is the only arrangement where you can see through one.
     this.sun = new THREE.Vector3(-0.34, 0.085, -0.936).normalize();
-    this.exposure = 1.0;
+    // Below 1 on purpose. The palette above does most of the darkening, but
+    // exposure is what stops a cloud edge clipping to flat white the moment the
+    // sun catches it — and a clipped highlight has no shape, so the biggest
+    // forms in the game lose their form exactly where they are most lit.
+    this.exposure = 0.78;
 
     /** Global coverage control. Gameplay writes this: a front rolling in is a
      *  slow ramp here, and everything downstream — visibility, concealment,
@@ -243,7 +282,7 @@ export class CloudSystem {
      * the shadow stops being marched. Low on purpose — a high value floods the
      * distance with unshadowed light and flattens every shaft in front of it.
      */
-    this.shaft = { mist: 1.0, sun: 0.22, phaseG: 0.58, local: 70.0, farShadow: 0.30 };
+    this.shaft = { mist: 1.0, sun: 0.22, phaseG: 0.58, local: 45.0, farShadow: 0.30 };
 
     /** Local light sources the march samples. Bounded, chosen per frame; see
      *  lights.js. The ship, the creatures and this class's own storms all
@@ -366,7 +405,18 @@ export class CloudSystem {
       uDeepTint: { value: c3(P.deepTint) },
       uHazeColor: { value: c3(P.haze) },
       uPhase: { value: new THREE.Vector2(0.68, -0.25) },
-      uSigmaT: { value: 0.045 },
+      // Extinction per metre of density, and the master control for mood.
+      //
+      // This was 0.045, and at that value the medium was too thin to cast a
+      // shadow — you could see straight through a cloud into the sun. That is
+      // why there were no god rays worth the name: a shaft is the *absence* of
+      // light beside it, and nothing here was blocking enough to carve one.
+      // Measured looking into the sun, 0.045 gave p50 190 with 65% of the frame
+      // blazing; 0.16 gives p50 42 with 17%. It also runs faster — 6.57 ms to
+      // 5.74 ms median on the GPU timer — because opaque cloud terminates a ray
+      // early. Above about 0.22 the frame goes monochrome and the shadow ends up
+      // *warmer* than the light, which inverts the palette.
+      uSigmaT: { value: 0.16 },
       uPowder: { value: 0.75 },
       uAerialK: { value: 9.0e-5 },
       uLightStep: { value: 42 },
@@ -388,6 +438,11 @@ export class CloudSystem {
       // occlusion march. Set against the scale of the palette, where a lit cloud
       // face is around 1.0, so this is roughly "two per cent of nothing".
       uLightCutoff: { value: 0.02 },
+      // One local-light sub-sample per 14 m of mist span. Set against the width
+      // of a beam rather than against anything about the march: a lamp cone at
+      // a hundred metres is some tens of metres across, and a stride that steps
+      // over it turns the beam into dots.
+      uLightSubDiv: { value: 1 / 14 },
       uBlueNoise: { value: this.blueTex },
     };
 
