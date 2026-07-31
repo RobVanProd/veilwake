@@ -264,10 +264,21 @@ function update(dt) {
   // rather than last frame's. The lamps sit off the hull centreline so the two
   // beams diverge slightly — a single centred lamp reads as a torch taped to a
   // camera, two read as a vehicle.
-  const p = ship.position, f = ship.forward, r = ship.right;
+  const p = ship.position, f = ship.forward, r = ship.right, u = ship.up;
   const on = controls.lightsOn;
-  clouds.lights.set(lampL, { on, position: [p.x - r.x * 1.4, p.y, p.z - r.z * 1.4], direction: [f.x, f.y, f.z] });
-  clouds.lights.set(lampR, { on, position: [p.x + r.x * 1.4, p.y, p.z + r.z * 1.4], direction: [f.x, f.y, f.z] });
+  // The lamps splay outward and slightly down rather than pointing along the
+  // view axis. Aimed straight ahead they sit exactly on the axis the camera
+  // looks down, and a cone seen end-on integrates to a featureless white disc —
+  // measured photic 19488 lm and it read as a blown ball of fog, not a beam.
+  // Splayed, the player sees the beams from the side, raking across whatever is
+  // out there, which is the only angle at which a shaft reads as a shaft. Down a
+  // little too, because the interesting thing to light in an ocean of cloud is
+  // the mass you are about to fly into, not the empty sky above it.
+  const SPLAY = 0.34, DROOP = 0.14;
+  const aimL = [f.x - r.x * SPLAY - u.x * DROOP, f.y - r.y * SPLAY - u.y * DROOP, f.z - r.z * SPLAY - u.z * DROOP];
+  const aimR = [f.x + r.x * SPLAY - u.x * DROOP, f.y + r.y * SPLAY - u.y * DROOP, f.z + r.z * SPLAY - u.z * DROOP];
+  clouds.lights.set(lampL, { on, position: [p.x - r.x * 1.4, p.y, p.z - r.z * 1.4], direction: aimL });
+  clouds.lights.set(lampR, { on, position: [p.x + r.x * 1.4, p.y, p.z + r.z * 1.4], direction: aimR });
   // The plume is never off — an engine under power glows whether the pilot likes
   // it or not, which is what makes throttle a signature decision rather than a
   // free one.

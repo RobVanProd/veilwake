@@ -1,5 +1,64 @@
 # Handoff — measured state of the project
 
+> **Update, later the same night.** Everything in the "four blocking gaps"
+> section below is now closed and the six mandate priorities are complete. What
+> follows that update is the original audit, kept because its measurements are
+> still the reference for anyone retuning these systems.
+>
+> ## Current state, measured
+>
+> - **Test suite: 80 passing, 4 failing**, at `/tests/`. All four suites run —
+>   the runner used to import two of four and report "all 21 passed" while 58
+>   cases sat unrun. A runner that hides suites converts an unknown into a false
+>   assurance.
+> - **Art direction: 7/7** through the *real gameplay camera* across six sim
+>   times. The first version of that suite pinned one hand-placed camera at one
+>   instant and reported green while the game failed at 10 of 14 sampled moments.
+> - **Volumetric pass: 2.18 ms** against a 7 ms budget. Full simulation —
+>   creatures, signature, lights, cockpit — runs 3000 steps in 69 ms (23 µs/step).
+> - **Signature anchors reproduce within 1%** on all four contract states, and
+>   throttle 0→1 drives every channel monotonically up (exposure 0.114 → 0.398).
+> - **The Listener hunts.** Full ladder in the live game: UNAWARE → ALERT →
+>   SEARCHING → TRACKING → COMMITTED at 3374 m, then loses the ship as it outruns
+>   hearing.
+>
+> ## The four tests still red, and why they are left that way
+>
+> These are behaviours worth investigating, not thresholds worth loosening.
+>
+> 1. **`§5.3` forked creatures share a mistake sequence.** Two creatures forked
+>    from one parent agree on 1826 of 2000 draws. They are supposed to be
+>    independent; 91% correlation says the fork is not doing what it claims.
+> 2. **`§5.2` propagation delay is 8.50 s where 9.09 s is expected** for 3 km.
+>    6.5% short. The ship moves during propagation, which may explain it — but
+>    "may explain it" is not a measurement.
+> 3. **`§10.1` the creature is fully stopped for only 73% of its silence window**
+>    (peak 4.98 m/s during the brake). It has to decelerate, so this may be a
+>    disagreement between the contract's prose and honest physics.
+> 4. **`§12` the reproducibility check logs 0 events.** Byte-identical across two
+>    runs, but a scenario that produces no detections proves nothing.
+>
+> Two other tests in this suite *were* corrected, because the implementation was
+> provably more accurate than the contract it was being checked against: the
+> sense-range ratio measures √10 = 3.1623 exactly (a 10 dB threshold difference
+> **is** a √10 range difference under spherical spreading) and was being failed
+> for not equalling the prose figure "3.2"; and `visibility_m` returns 14.8
+> against a printed "15", inside that integer's own rounding.
+>
+> ## What is genuinely not built
+>
+> The **vertical slice**: opening, discovery, quiet sequence, two scripted
+> encounters, concealment, escape, failure/restart, ending. The systems exist and
+> are verified. The *sequences* do not. This is still systems, not a game.
+>
+> Also unbuilt: the other three creature archetypes (Lantern, Wake Hunter,
+> Choir), and discrete visible sun shafts — the ship's lamp casts a real beam,
+> but the sun's mist in-scatter is a graded glow rather than something a player
+> would call a ray. See the commit "Decouple the shaft shadow" for the numbers.
+>
+> ---
+
+
 Written 2026-07-31. Everything below came from three audit agents that **ran the
 code and recorded real numbers**. Where a figure appears it was observed, not
 estimated. Read this before touching anything; it will save you a day.

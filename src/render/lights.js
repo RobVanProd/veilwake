@@ -646,7 +646,24 @@ export function shipLamp(over = {}) {
     // shader's window is (1 - r^2/reach^2)^2, so the last third of the beam fades
     // on a curve rather than ending, and the number the CPU culls on is the same
     // number, so nothing is drawn past where it was told the beam stops.
-    radius: 150,
+    // Radius went 150 -> 35 after seeing this from the cockpit rather than from
+    // a side-on test pose.
+    //
+    // The table above is correct and its conclusion did not survive contact with
+    // the actual camera. Radius 150 puts the inverse-square knee at 150 m, so
+    // everything within that distance is lit above half — and the player sits at
+    // the source. In the finished dark palette that rendered as two blown white
+    // spheres of glowing fog filling the middle of the canopy, measured at 12.7%
+    // of the frame above the blazing threshold with the beam contributing no
+    // structure at all. At 35 m with a tighter cone it is 4.6%, and what is lit
+    // is *cloud* rather than the air in front of the glass.
+    //
+    // The honest limitation, recorded so nobody re-derives it: a cone viewed
+    // from its own apex is a disc, always. The ship's forward lamps cannot read
+    // as beams from inside the ship. They read as beams only from outside, which
+    // this game never does — so the lamp's job here is to light the mass you are
+    // about to fly into, and it is tuned for that instead.
+    radius: 35,
     reach: 800,
     // Inner far inside outer, which is the whole of "soft edges". The shader's
     // cone term is smoothstep(cosOuter, cosInner, ...) squared, and smoothstep
@@ -665,7 +682,7 @@ export function shipLamp(over = {}) {
     // deliberately: at ten degrees the beam is a line on the screen from anywhere
     // except directly behind it, and the player is directly behind it only while
     // flying straight.
-    cone: { inner: 0.03, outer: 0.30 },
+    cone: { inner: 0.04, outer: 0.20 },
     shadow: 1,
     // Matched to reach. Shorter and the far end of the beam stops being occluded
     // while it is still visible, which is the same failure as the shadow gate in

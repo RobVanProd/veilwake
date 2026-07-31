@@ -169,7 +169,15 @@ function scriptedWorld({
 test('§1 visibility_m reproduces the contract sanity table', () => {
   const want = [[0, 4000], [0.25, 987], [0.5, 244], [0.75, 60], [1, 15]];
   const got = want.map(([rho]) => visibilityM(rho));
-  const ok = want.every(([, w], i) => pct(got[i], w) < 0.01);
+  // Tolerance is half of the contract's own last printed digit, not a flat
+  // percentage. The table is published to three significant figures, so "15"
+  // means anything from 14.5 to 15.5, and the measured 14.8 is inside it. A flat
+  // 1% tolerance called that a failure — it was measuring the contract's
+  // rounding rather than the implementation's accuracy.
+  // Half a unit, since the table prints integers, or 0.5% for the large values
+  // where three significant figures is the real limit. 14.8 against a printed
+  // "15" is inside the rounding; a flat 1% called it a failure.
+  const ok = want.every(([, w], i) => Math.abs(got[i] - w) <= Math.max(0.5, w * 0.005) + 1e-9);
   return { ok, detail: got.map((g) => f(g, 1)).join(' / ') + '  vs  4000/987/244/60/15' };
 });
 
@@ -196,8 +204,14 @@ test('§10.1 sense ranges fall out: 3.2 km at threshold 16, 10 km at 6', () => {
     return lo;
   };
   const a = rangeFor(LISTENER.threshold), b = rangeFor(LISTENER.listeningThreshold);
-  const ok = pct(a, 3200) < 0.02 && pct(b, 10000) < 0.01 && near(b / a, 3.2, 0.02);
-  return { ok, detail: `${f(a, 0)} m → ${f(b, 0)} m, factor ${f(b / a, 3)} (contract 3.2)` };
+  // The factor is sqrt(10) = 3.1623, exactly, and that is the point rather than
+  // a near miss. The two thresholds differ by 10 dB, and under 20*log10(r)
+  // spherical spreading a 10 dB difference IS a sqrt(10) difference in range.
+  // The contract prints 3.2 because it is prose; the implementation is more
+  // precise than its own specification, and asserting against the rounded figure
+  // to two decimal places failed a formula that is exactly correct.
+  const ok = pct(a, 3200) < 0.02 && pct(b, 10000) < 0.01 && near(b / a, Math.sqrt(10), 0.01);
+  return { ok, detail: `${f(a, 0)} m → ${f(b, 0)} m, factor ${f(b / a, 3)} (= sqrt(10), contract prints 3.2)` };
 });
 
 test('§2.3 duct is derived, not authored: 0 flat, 1 at a gradient, 0 in a core', () => {
