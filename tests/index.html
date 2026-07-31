@@ -20,16 +20,20 @@
   .sub { color: #6f8299; margin-bottom: 20px; }
   #summary { font-size: 14px; margin-bottom: 16px; }
   .ok { color: #8fe3a8; } .bad { color: #ff8b8b; } .dim { color: #55677e; }
-  table { border-collapse: collapse; max-width: 760px; width: 100%; }
+  table { border-collapse: collapse; max-width: 1400px; width: 100%; }
   td { padding: 3px 10px 3px 0; vertical-align: top; border-bottom: 1px solid #121b26; }
   td.v { width: 52px; }
   td.n { color: #cfe2f5; }
-  td.d { color: #55677e; text-align: right; white-space: nowrap; }
+  td.d { color: #55677e; text-align: right; }
+  /* The notes are the point of the suites below controls — a row that says
+     "FAIL" without saying by how much sends the next person to re-derive a
+     whole channel. They wrap rather than truncate. */
+  td.d { max-width: 460px; }
 </style>
 </head>
 <body>
 <h1>VEILWAKE</h1>
-<div class="sub">control polarity — every input measured against real ship motion</div>
+<div class="sub">every claim below is a measurement, and every row says what it measured</div>
 <div id="summary" class="dim">running…</div>
 <table id="rows"></table>
 
@@ -38,28 +42,64 @@
 // browser happily serves the module graph from before the last edit, which
 // once made a fixed bug look unfixed.
 const v = Date.now();
-const T = await import(`./controls.test.js?v=${v}&bust=${v}`);
 
-const r = T.run();
-const sum = document.getElementById('summary');
-sum.className = r.fail.length ? 'bad' : 'ok';
-sum.textContent = r.fail.length
-  ? `${r.fail.length} FAILED — ${r.pass}/${r.results.length} passed`
-  : `all ${r.pass} passed`;
+// Each suite exports run() -> { pass, fail, results }. A result is
+// { name, want, got, ok } plus either a `note` string or the control suite's
+// `detail` object; nothing here needs to know which.
+const SUITES = [
+  ['control polarity',   './controls.test.js'],
+  ['ship signature',     './systems.test.js'],
+  ['the Listener',       './listener.test.js'],
+];
 
 const rows = document.getElementById('rows');
-for (const x of r.results) {
-  const tr = document.createElement('tr');
-  const n = (q) => (typeof q === 'number' ? q.toFixed(3) : q);
-  tr.innerHTML =
-    `<td class="v ${x.ok ? 'ok' : 'bad'}">${x.ok ? 'pass' : 'FAIL'}</td>` +
-    `<td class="n">${x.name}</td>` +
-    `<td class="${x.ok ? 'dim' : 'bad'}">${x.ok ? x.got : `wanted ${x.want}, got ${x.got}`}</td>` +
-    `<td class="d">turn ${n(x.detail.sideways)} · nose ${n(x.detail.vertical)} · wing ${n(x.detail.wing)}</td>`;
-  rows.appendChild(tr);
+const sum = document.getElementById('summary');
+const n = (q) => (typeof q === 'number' ? q.toFixed(3) : q);
+let pass = 0, fail = 0, total = 0;
+const all = {};
+
+for (const [label, path] of SUITES) {
+  sum.textContent = `running ${label}…`;
+  let r;
+  try {
+    const T = await import(`${path}?v=${v}&bust=${v}`);
+    r = T.run();
+  } catch (err) {
+    // A suite that fails to load is a failure, loudly. A broken module graph
+    // has silently taken this project's page down before.
+    fail++; total++;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td class="v bad">FAIL</td><td class="n">${label}</td>` +
+      `<td class="bad" colspan="2">did not load — ${err}</td>`;
+    rows.appendChild(tr);
+    continue;
+  }
+  all[label] = r;
+  pass += r.pass; fail += r.fail.length; total += r.results.length;
+
+  const head = document.createElement('tr');
+  head.innerHTML = `<td class="v dim">${r.fail.length ? '' : 'ok'}</td>` +
+    `<td class="n" colspan="3"><b>${label}</b> — ${r.pass}/${r.results.length}</td>`;
+  rows.appendChild(head);
+
+  for (const x of r.results) {
+    const detail = x.note !== undefined ? x.note
+      : x.detail ? `turn ${n(x.detail.sideways)} · nose ${n(x.detail.vertical)} · wing ${n(x.detail.wing)}`
+      : '';
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td class="v ${x.ok ? 'ok' : 'bad'}">${x.ok ? 'pass' : 'FAIL'}</td>` +
+      `<td class="n">${x.name}</td>` +
+      `<td class="${x.ok ? 'dim' : 'bad'}">${x.ok ? x.got : `wanted ${x.want}, got ${x.got}`}</td>` +
+      `<td class="d">${detail}</td>`;
+    rows.appendChild(tr);
+  }
 }
 
-globalThis.TESTS = r;
+sum.className = fail ? 'bad' : 'ok';
+sum.textContent = fail ? `${fail} FAILED — ${pass}/${total} passed` : `all ${pass} passed`;
+
+globalThis.TESTS = { pass, fail, total, suites: all };
 </script>
 </body>
 </html>
