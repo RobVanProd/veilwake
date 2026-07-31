@@ -44,6 +44,7 @@ import * as THREE from 'three';
 import { makeShapeVolume, makeDetailVolume, makeWeatherMap, makeBlueNoiseTile, sample2D, sample3D } from './noise.js';
 import { FULLSCREEN_VERT, MARCH_FRAG, COMPOSITE_FRAG, PROBE_FRAG } from './shaders/cloud.glsl.js';
 import { LightRegistry, MAX_MARCH_LIGHTS, lightningCell } from './lights.js';
+import { Luminaries, MEDIUM_ALBEDO } from './sky.js';
 import { clamp01, lerp, smoothstep } from '../core/math.js';
 import { seedFrom } from '../core/rng.js';
 
@@ -360,6 +361,14 @@ export class CloudSystem {
      *  to "the volume around it is lit". */
     this.lights = new LightRegistry();
 
+    /**
+     * The luminaries. There is no sun; see sky.js for why that is a design
+     * decision rather than a naming one. Constructed here so a CloudSystem is
+     * still self-contained, and driven from update() so the palette is always
+     * the one the current lights imply.
+     */
+    this.sky = new Luminaries({ seed: s });
+
     this.storms = [];
     for (let i = 0; i < 4; i++) {
       this.storms.push({ x: 0, y: 0, z: 0, radius: 1400, intensity: 0, r: 0, g: 0, b: 0, charge: 0 });
@@ -498,6 +507,7 @@ export class CloudSystem {
       uLightShape: { value: new THREE.Vector2(1.48, 0.16) },
       uShaft: { value: new THREE.Vector4() },
       uShaftSigma: { value: 0.045 },
+      uAlbedo: { value: c3(MEDIUM_ALBEDO) },
       uShaftFloor: { value: 0.10 },
       uShaftDensGain: { value: 14.0 },
       uShaftStep: { value: new THREE.Vector4() },
@@ -678,6 +688,13 @@ export class CloudSystem {
     this.time += dt;
     const t = this.time;
     const f = this.field;
+
+    // The sky first, because everything downstream is lit by it. The luminaries
+    // own the whole palette — key direction and colour, ambient, haze, deep
+    // tint and the sky gradient — so there is exactly one place that decides
+    // what colour this world is at any moment, and the sky can never disagree
+    // with the light that is supposedly making it.
+    if (this.sky) { this.sky.update(t); this.sky.applyTo(this); }
 
     if (camera) {
       camera.getWorldPosition(this._camPos);

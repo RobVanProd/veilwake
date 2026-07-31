@@ -82,6 +82,41 @@ export function measureMood(renderer, sample = 4) {
   const shadowWarm = darkN ? (darkR - darkB) / darkN : 0;
   const litWarm = litN ? (litR - litB) / litN : 0;
 
+  // Chroma: is there any colour in this frame at all?
+  //
+  // warmth is blind to the named failure mode. A frame can score a perfect cold
+  // warmth of -5 and still be grey, because R minus B says nothing about how far
+  // either is from G. "Not generic grey fog" is the thing ART_DIRECTION warns
+  // about most and the thing an untuned ray march produces by default, so it
+  // needs its own number.
+  //
+  // Measured as mean HSV saturation over pixels bright enough to have a hue
+  // worth measuring — near-black pixels have wild saturation from quantisation
+  // and would swamp the average with noise from the part of the frame nobody is
+  // looking at. `hueSpread` is the circular spread of those hues: a frame lit by
+  // one source is chromatic but monotonous, and a world with several luminaries
+  // should show more than one hue at once.
+  let satSum = 0, satN = 0, hx = 0, hy = 0;
+  for (let i = 0; i < n; i++) {
+    if (L[i] < 24) continue;
+    const r = R[i] / 255, g = G[i] / 255, b = B[i] / 255;
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    const d = mx - mn;
+    if (mx <= 0) continue;
+    satSum += d / mx; satN++;
+    if (d > 0.02) {
+      let h;
+      if (mx === r) h = ((g - b) / d) % 6;
+      else if (mx === g) h = (b - r) / d + 2;
+      else h = (r - g) / d + 4;
+      h *= Math.PI / 3;
+      hx += Math.cos(h); hy += Math.sin(h);
+    }
+  }
+  const chroma = satN ? satSum / satN : 0;
+  // 0 = every hue points the same way, 1 = hues are spread around the wheel.
+  const hueSpread = satN ? 1 - Math.hypot(hx, hy) / satN : 0;
+
   return {
     p01: +p01.toFixed(1), p05: +p05.toFixed(1), p50: +p50.toFixed(1),
     p95: +p95.toFixed(1), p99: +p99.toFixed(1), p999: +p999.toFixed(1),
@@ -93,6 +128,10 @@ export function measureMood(renderer, sample = 4) {
     litFrac: +(litFrac / n * 100).toFixed(2),
     blownFrac: +(blown / n * 100).toFixed(2),
     warmth: +warmth.toFixed(1),
+    /** Mean saturation of pixels bright enough to have a hue. Grey scores ~0. */
+    chroma: +chroma.toFixed(3),
+    /** How many different hues are present. One light source scores low. */
+    hueSpread: +hueSpread.toFixed(3),
     shadowWarm: +shadowWarm.toFixed(1),
     litWarm: +litWarm.toFixed(1),
     /** Positive means light is warmer than shadow, which is the palette's intent. */

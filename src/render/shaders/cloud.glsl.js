@@ -202,6 +202,7 @@ uniform vec4  uShaft;        // ambient mist gain, sun shaft gain, phase g, loca
 uniform vec4  uShaftStep;    // first shadow step, growth, sample stride, stride growth per metre
 uniform vec3  uShaftRange;   // fade start, fade end, shadow assumed beyond it
 uniform float uShaftSigma;   // extinction for the SHAFT shadow only, not the cloud body
+uniform vec3  uAlbedo;       // the medium's own colour; it is not water
 uniform float uShaftFloor;   // in-scatter in genuinely empty air, 0..1
 uniform float uShaftDensGain;// how fast local density brings the in-scatter up
 
@@ -776,7 +777,16 @@ void main() {
     // of a cloud dark and its top bright without any extra sampling.
     vec3 amb = mix(uAmbBottom, uAmbTop, h) * (0.30 + 0.70 * exp(-(1.0 - h) * 1.7));
 
-    vec3 radiance = uSunColor * energy + amb;
+    // The medium has a colour of its own.
+    //
+    // Real cloud is white because water scatters neutrally across the visible
+    // band. This is not water, and a neutral medium under a neutral light was
+    // most of why frames measured a chroma of 0.055 — grey, which is the failure
+    // ART_DIRECTION names as the most likely one. The albedo matters more than
+    // the tint of the key: it means the lit and shadowed faces of one mass differ
+    // in HUE and not only in value, which is what stops a cloud reading as a grey
+    // shape with a bright edge.
+    vec3 radiance = (uSunColor * energy + amb) * uAlbedo;
     // Local lights, at the excess over what the mist term above has already
     // accounted for.
     //

@@ -69,6 +69,39 @@ Required behaviour:
 - Shafts must move. A static shaft reads as geometry; the medium is breathing, so
   the light through it breathes too.
 
+## Light: there is no sun
+
+**The world is lit by luminaries, not by a star.** `src/render/sky.js` owns three
+coloured sources that rise and set on long, mutually prime cycles, and the entire
+palette — key direction and colour, sky gradient, haze, ambient, deep multiple
+scattering — is *derived* from whichever are currently up. Nothing about the
+light is authored twice, so the sky can never disagree with what is supposedly
+lighting it.
+
+This section exists because the renderer spent a long time quietly assuming
+Earth, and the assumption was invisible until it was measured. The key was
+`[2.30, 2.24, 2.02]` — white in all but name — over a medium with a neutral
+albedo, and the frames measured a **chroma of 0.055**: grey, the failure named
+below as the most likely one. You cannot tint your way out of that, because a
+white source through a white medium gives white and anything applied afterwards
+reads as a filter over a photograph.
+
+- **Veil** — cold green-cyan. Most of the game happens under it.
+- **Ember** — copper, dim, up about a third of the time. Warm and *wrong*.
+- **Drown** — indigo, always present, never dominant. It exists so shadow has a
+  hue instead of being an absence.
+
+**The medium is not water.** `MEDIUM_ALBEDO` gives the vapour a slight cast of
+its own, which matters more than the tint of the key: it means the lit and
+shadowed faces of one mass differ in **hue** and not only in value, and that is
+what stops a cloud reading as a grey shape with a bright edge.
+
+**Two properties are asserted by `tests/mood.test.js` and are not negotiable
+without a decision:** the frame is never grey (`chroma >= 0.12` at every sampled
+moment), and **the light changes across a run** (warmth spans at least 25; it
+currently spans 61.7). The second is unwritable against a sun, and
+`GAME_VISION`'s third beat — *"a light that was there is not"* — depends on it.
+
 ## Colour
 
 Restrained but striking. **Not generic grey fog** — that is the named failure
