@@ -14,6 +14,7 @@
 // takes a live `GAME` and measures real pixels, so it needs the browser rig.
 const SUITES = [
   ['control polarity', '../tests/controls.test.js'],
+  ['ship signature', '../tests/signature.test.js'],
   ['light registry', '../tests/lights.test.js'],
   ['creature contract', '../tests/creature.test.js'],
 ];
