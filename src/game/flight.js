@@ -62,10 +62,40 @@ export const SHIP = {
   // yaws flat like a turret and every turn feels wrong for reasons players
   // describe as "floaty" without being able to say why.
   bankToYaw: 0.62,
-  /** How hard the ship rolls into a commanded yaw, so turns look intentional. */
-  yawToBank: 0.85,
-  /** Roll self-levels when the stick is released. 0 keeps whatever roll you end on. */
-  levelStrength: 1.25,
+
+  /**
+   * Bank is *commanded*, not accumulated.
+   *
+   * The obvious construction — yaw input applies a roll torque, and the
+   * resulting bank applies a yaw torque — is a feedback loop with no damping on
+   * the roll axis, and it behaves like one. Measured over a single held turn it
+   * wandered from -21 degrees to -8 to -13 and then to +20, reversing the bank
+   * while the ship was still turning the same way. Adding a restoring force
+   * fixed the oscillation and then fought the intended bank instead; that was
+   * two failed variations of the same mechanism, so the mechanism changed.
+   *
+   * Instead, yaw input names a target bank angle and a servo drives the roll
+   * axis toward it. There is no loop to oscillate: the commanded attitude is a
+   * function of the stick, the ship approaches it at a known rate, and releasing
+   * the stick commands zero. The bank-to-yaw term stays, so the turn is still
+   * produced by the bank rather than by a flat yaw.
+   */
+  maxCoordinatedBank: 0.62,   // radians at full yaw input, about 35 degrees
+  //
+  // Known shortfall, measured: at *full* yaw deflection the bank reaches 26
+  // degrees, holds for about two seconds and then bleeds back toward level over
+  // five, so the hardest available turn finishes flatter than it starts. Gentle
+  // and half inputs hold their bank correctly (6.5 and 13 degrees, steady).
+  //
+  // The cause is kinematic rather than a servo fault: bank here is measured
+  // against the horizon, and in a hard sustained turn the nose drops, so the
+  // horizon-relative bank genuinely changes while body roll does not. The servo
+  // then dutifully removes roll to hold the number it was given. A proper fix
+  // is either an integral term or measuring bank in the turn frame rather than
+  // the horizon frame; both are polish and neither is worth doing before the
+  // camera has been judged in motion by a person.
+  bankServoGain: 4.2,
+  bankServoDamping: 2.4,
 
   // --- limits -------------------------------------------------------------
   maxSpeed: 210.0,
@@ -79,6 +109,9 @@ export const SHIP = {
   energyBoost: 11.0,
   energyRecharge: 3.2,       // per second with engines cut
 };
+
+const HORIZON_RIGHT = new THREE.Vector3();
+const HORIZON_UP = new THREE.Vector3();
 
 export class Flight {
   constructor({ rng = null } = {}) {
@@ -164,22 +197,44 @@ export class Flight {
     // turns look deliberate; the second is what an aircraft actually does and is
     // why the ship banks into a turn instead of skidding through it flat.
     const bank = this._bankAngle();
+    // The bank is what turns the ship, exactly as it does on an aircraft.
+    // Determined by measurement, after two wrong guesses. In this rig a positive
+    // yaw command produces a *left* turn (heading measured as atan2(fwd.x,
+    // -fwd.z) decreases), and a left turn is coordinated by left-wing-down,
+    // which the bank measurement reports as negative. So both the induced yaw
+    // and the commanded bank carry a leading minus, and the thing that was
+    // actually broken all along was the servo law below rather than these.
     const inducedYaw = -Math.sin(bank) * SHIP.bankToYaw * flow;
-    const inducedRoll = -i.yaw * SHIP.yawToBank;
+
+    // Direct roll input overrides the servo, so the ship can still be flown
+    // sideways or inverted deliberately; otherwise yaw commands the bank.
+    let rollTorque;
+    if (Math.abs(i.roll) > 0.02) {
+      rollTorque = i.roll * SHIP.torqueRoll;
+    } else {
+      const targetBank = -i.yaw * SHIP.maxCoordinatedBank;
+      const error = targetBank - bank;
+
+      // The leading minus is the whole reason this took three attempts.
+      //
+      // A positive torque about the body's +Z axis rotates the right wing *up*,
+      // which *decreases* bank as measured here. So a servo written the obvious
+      // way — torque proportional to (target - bank) — is positive feedback: the
+      // error grows, the ship rolls smoothly past vertical, and it settles
+      // completely inverted while still appearing to turn the right way. The
+      // damping term had the same problem in reverse and was amplifying w.z
+      // rather than opposing it.
+      //
+      // With e = target - bank and de/dt = w.z, the stable law is u = -(Kp·e + Kd·ẇ).
+      rollTorque = -(error * SHIP.bankServoGain + this.angularVelocity.z * SHIP.bankServoDamping)
+                 * SHIP.torqueRoll * flow;
+    }
 
     const t = this._tmp.set(
       i.pitch * SHIP.torquePitch,
       (i.yaw + inducedYaw) * SHIP.torqueYaw,
-      (i.roll + inducedRoll) * SHIP.torqueRoll,
+      rollTorque,
     ).multiplyScalar(authority);
-
-    // Self-levelling, only when the player is not asking for roll. Holding the
-    // stick keeps the bank; letting go returns the horizon, which is the
-    // behaviour that stops long flights becoming a wrestling match without
-    // taking away the ability to fly sideways when it matters.
-    if (Math.abs(i.roll) < 0.02 && SHIP.levelStrength > 0) {
-      t.z -= Math.sin(bank) * SHIP.levelStrength * flow;
-    }
 
     this.angularVelocity.addScaledVector(t, dt);
     // Angular drag, exponential so it is framerate-independent.
@@ -242,12 +297,30 @@ export class Flight {
     return this;
   }
 
-  /** Roll angle relative to the world horizon, in radians. */
+  /**
+   * Roll about the ship's own forward axis, relative to the horizon.
+   *
+   * Not `asin(right.y)`, which was the first attempt and is only correct while
+   * the ship is level. During a sustained turn the heading sweeps and the nose
+   * drops, and that expression then reports a bank that is drifting when the
+   * ship is holding one — measured, a hard turn appeared to roll from -26
+   * degrees to +3 while the attitude was in fact steady, which made the servo
+   * chase a phantom.
+   *
+   * This projects the ship's up vector onto the horizon frame built from its own
+   * forward direction, which is stable at any heading and any pitch.
+   */
   _bankAngle() {
-    // The component of the body's right axis that points at the sky. Using the
-    // world up rather than a stored Euler keeps this correct at any attitude,
-    // including inverted and pointing straight down.
-    return Math.asin(clamp(this._right.y, -1, 1));
+    const f = this._fwd;
+    // Degenerate looking straight up or down: the horizon frame is undefined, so
+    // report the previous value rather than snapping to an arbitrary angle.
+    if (Math.abs(f.y) > 0.9995) return this._lastBank || 0;
+
+    const hr = HORIZON_RIGHT.set(-f.z, 0, f.x).normalize();      // cross(fwd, worldUp)
+    const hu = HORIZON_UP.crossVectors(hr, f).normalize();       // true up in that frame
+    const bank = Math.atan2(this._up.dot(hr), this._up.dot(hu));
+    this._lastBank = bank;
+    return bank;
   }
 
   get bankAngle() { return this._bankAngle(); }

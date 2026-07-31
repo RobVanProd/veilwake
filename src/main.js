@@ -16,6 +16,11 @@ import { Loop } from './core/loop.js';
 import { Rng, seedFrom } from './core/rng.js';
 import { BUDGET } from './core/perf.js';
 import { CloudSystem } from './render/clouds.js';
+import { Flight } from './game/flight.js';
+import { ShipCamera } from './game/camera.js';
+import { Controls } from './game/controls.js';
+import { Input } from './core/input.js';
+import { Pointer } from './core/pointer.js';
 
 const canvas = document.getElementById('gl');
 const diagEl = document.getElementById('diag');
@@ -55,6 +60,17 @@ camera.position.set(0, 0, 0);
 
 const rng = new Rng(seedFrom('veilwake:phase0'));
 const clouds = new CloudSystem({ renderer, seed: 'veilwake', quality: 'high' });
+
+const input = new Input(canvas);
+const pointer = new Pointer(canvas);
+const ship = new Flight({ rng });
+const controls = new Controls(input, pointer);
+const shipCam = new ShipCamera(camera);
+
+// Start inside the cloud layer rather than above it. Where the camera sits is
+// art direction here, not scene setup: the same renderer looks like a flight sim
+// from above the layer and like this game from inside it.
+ship.position.set(0, 140, 0);
 
 // ---------------------------------------------------------------------------
 // A placeholder scene, purely to prove the pipeline.
@@ -101,10 +117,35 @@ scene.add(markers);
 const state = { heading: 0 };
 
 function update(dt) {
-  state.heading += dt * 0.06;
-  markers.rotation.y = state.heading * 0.15;
+  controls.update(dt).applyTo(ship);
+
+  // The medium pushes back. Turbulence is an acceleration on the body, not
+  // screen shake: the player has to fly against it, and the camera shakes only
+  // because the ship did.
+  const flow = clouds.flowAt ? clouds.flowAt(ship.position.x, ship.position.y, ship.position.z) : null;
+  const density = clouds.densityAt
+    ? clouds.densityAt(ship.position.x, ship.position.y, ship.position.z) : 0;
+  if (flow) {
+    TURB.set(flow.x, flow.y, flow.z).multiplyScalar(2.4 * (0.25 + density));
+    // A little chop that scales with density and speed, so thick cloud is
+    // physically harder to fly through and the player can feel where they are.
+    const chop = density * Math.min(ship.speed / 120, 1.5) * 3.2;
+    TURB.x += Math.sin(loop.simTime * 3.1 + 1.7) * chop;
+    TURB.y += Math.sin(loop.simTime * 2.3) * chop * 0.7;
+    TURB.z += Math.sin(loop.simTime * 2.9 + 4.1) * chop * 0.5;
+    ship.setTurbulence(TURB, Math.min(density * 1.6, 1));
+  }
+
+  ship.step(dt);
+  shipCam.update(ship, dt, loop.simTime);
+
+  markers.rotation.y = (state.heading += dt * 0.06) * 0.15;
   clouds.update(dt, camera);
+  input.endFrame();
+  pointer.endFrame();
 }
+
+const TURB = new THREE.Vector3();
 
 /** When set, render() uses this size instead of the element's. Capture only. */
 let forcedSize = null;
@@ -158,6 +199,7 @@ loop.render = (alpha, frameMs) => {
 
 globalThis.GAME = {
   THREE, renderer, scene, camera, loop, rng, BUDGET, clouds,
+  ship, controls, shipCam, input, pointer,
   stats: () => loop.perf.stats(),
   violations: () => loop.perf.violations(),
 
