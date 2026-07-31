@@ -414,8 +414,20 @@ function update(dt) {
   const SPLAY = 0.34, DROOP = 0.14;
   const aimL = [f.x - r.x * SPLAY - u.x * DROOP, f.y - r.y * SPLAY - u.y * DROOP, f.z - r.z * SPLAY - u.z * DROOP];
   const aimR = [f.x + r.x * SPLAY - u.x * DROOP, f.y + r.y * SPLAY - u.y * DROOP, f.z + r.z * SPLAY - u.z * DROOP];
-  clouds.lights.set(lampL, { on, position: [p.x - r.x * 1.4, p.y, p.z - r.z * 1.4], direction: aimL });
-  clouds.lights.set(lampR, { on, position: [p.x + r.x * 1.4, p.y, p.z + r.z * 1.4], direction: aimR });
+  // The mount offset carries all three components of `right`, including y.
+  //
+  // It used to read `[p.x - r.x*1.4, p.y, p.z - r.z*1.4]` — the y term dropped —
+  // so the lamps stayed in the world's horizontal plane no matter how the ship
+  // rolled. Measured at 35 degrees of bank, the ship's right vector had a world
+  // y of -0.569 while both lamps still reported a world y offset of exactly 0:
+  // the hull banked and the lights did not go with it. That is the "I bank right
+  // and the lights say left" the owner reported, and it is the same shape of
+  // mistake as the roll input sign — one component quietly missing from an
+  // otherwise correct expression.
+  const offL = [p.x - r.x * 1.4, p.y - r.y * 1.4, p.z - r.z * 1.4];
+  const offR = [p.x + r.x * 1.4, p.y + r.y * 1.4, p.z + r.z * 1.4];
+  clouds.lights.set(lampL, { on, position: offL, direction: aimL });
+  clouds.lights.set(lampR, { on, position: offR, direction: aimR });
   // The plume is never off — an engine under power glows whether the pilot likes
   // it or not, which is what makes throttle a signature decision rather than a
   // free one.
