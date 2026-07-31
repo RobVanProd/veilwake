@@ -211,7 +211,17 @@ export const SIG = {
     photic: 40000.0,   // applied logarithmically; lumens span four decades
     em: 60.0,
     wake: 4.0,
-    relSpeed: 148.0,
+    // The boost row's reference speed, not cruise. This read 148 — the *cruise*
+    // speed — which pegged the bar at 1.000 during ordinary cruise and left the
+    // channel unable to report anything above it, while every other divisor here
+    // is a genuine extreme. 237.0 is sqrt(thrustBoost/dragForward) =
+    // sqrt(118/0.0021), the same number `cruiseRel`'s note derives the boost
+    // dynamic-pressure ratio from, so the boost row is internally consistent.
+    // Measured against the shipped flight model: the drag terminal at boost is
+    // 237.05 m/s, and the highest speed actually reachable from cruise on a full
+    // energy bar is 214.4 m/s at t+1.87 s (the boost drains the bar first), so
+    // 1.0 on this bar means "faster than this ship has ever been".
+    relSpeed: 237.0,
   },
 
   // --- sampling ------------------------------------------------------------
@@ -248,6 +258,31 @@ export const TRAIL = {
   // buffer cap of 512 at 2 Hz was sized from that number, so getting this
   // fraction wrong would silently truncate trails or waste memory.
   thermalShedFraction: 0.55,
+
+  // --- the spatial gate ----------------------------------------------------
+  // Shedding is gated on distance travelled *through the medium*, not on the
+  // wall clock alone, and this is the single most important correction this file
+  // has had. On a pure 4 Hz timer a station-keeping ship stacked all 768 wake
+  // parcels at one point and `ParcelField.sample()` summed every one of them:
+  // measured, a stationary ship read 4.595 s⁻¹ at the Wake Hunter's 165 m radius
+  // — 92× its threshold, 2.3× its saturation, and 4.5× louder than the same ship
+  // at full cruise. The thermal trail was worse: 512 parcels summing to 572.69 ΔK
+  // against a hull that was actually 11.86 ΔK above ambient. That inverted the
+  // design's central promise, which is that going quiet makes you safe.
+  //
+  // Relative speed rather than ground speed, because that is what actually tears
+  // the vapour — the same subtraction that produces the relSpeed channel. A ship
+  // drifting with a current sheds nothing, which is what contract §3.3 states in
+  // words ("drifting genuinely leaves no wake trail"), and a ship holding station
+  // *in* a current sheds a normal trail that then blows downstream, which is also
+  // right and was not reachable before.
+  //
+  // The spacing is derived, not chosen: it is exactly how far the ship moves
+  // between shed events at cruise, so cruise behaviour is unchanged (37 m and
+  // 74 m) and everything slower is spaced out instead of piled up. Above cruise
+  // the rate cap takes over and the spacing widens.
+  wakeShedM: SIG.cruiseRel / 4,        // = 37 m, with wakeShedHz
+  thermalShedM: SIG.cruiseRel / 2,     // = 74 m, with thermalShedHz
 
   // Cached flow per parcel, refreshed on a rota. Flow varies slowly in space —
   // it is three global advection winds plus a local convection term — so a
@@ -289,6 +324,8 @@ export class EmissionBus {
       });
     }
     this.count = 0;
+    /** Emissions refused because the bus was full. Read by `report()`. */
+    this.dropped = 0;
 
     // Modifiers rather than emissions: a system that changes how the *hull*
     // behaves writes here. The emergency vent is the only current user and it is
@@ -313,8 +350,13 @@ export class EmissionBus {
    * two would make a 96 dB scan pulse audible for forty seconds.
    */
   add(label, e) {
-    if (this.count >= this.records.length) return null;   // silently dropping is
-    const r = this.records[this.count++];                 // worse than not adding
+    // Dropping past capacity is a real possibility once the ship has per-light
+    // and per-subsystem granularity, and a signature that is quietly missing a
+    // source is worse than one that is loud — so the drop is counted rather than
+    // silent, and `report()` surfaces the count. (The unfinished sentence that
+    // used to be here was the tell that this was never thought through.)
+    if (this.count >= this.records.length) { this.dropped++; return null; }
+    const r = this.records[this.count++];
     r.label = label;
     r.acousticDb = e.acousticDb || 0;
     r.acousticCrackDb = e.acousticCrackDb || 0;
@@ -448,6 +490,33 @@ class ParcelField {
     return i;
   }
 
+  /**
+   * Rewrite the most recently shed parcel instead of adding another.
+   *
+   * This is what a ship that has not moved does. Appending would stack hundreds
+   * of parcels at one point and sum them; shedding nothing at all would make a
+   * hot hull holding station thermally invisible, which is the opposite error
+   * and just as wrong. Refreshing in place gives the honest answer: one parcel,
+   * carrying the current value, at the ship. Measured on a station-keeping ship
+   * whose hull is 11.86 ΔK above ambient, a receiver at the ship now reads
+   * 6.52 ΔK against the 572.69 it read when parcels accumulated.
+   */
+  refresh(x, y, z, value, tau, time, medium) {
+    if (this.count === 0) return this.shed(x, y, z, value, tau, time, medium);
+    const i = (this.head - 1 + this.cap) % this.cap;
+    this.pos[i * 3] = x; this.pos[i * 3 + 1] = y; this.pos[i * 3 + 2] = z;
+    this.value0[i] = value;
+    this.born[i] = time;
+    this.tau[i] = tau;
+    if (medium) {
+      medium.flowAt(x, y, z, this._out);
+      this.flow[i * 3] = this._out.x;
+      this.flow[i * 3 + 1] = this._out.y;
+      this.flow[i * 3 + 2] = this._out.z;
+    }
+    return i;
+  }
+
   /** Advect on the cached flow, and refresh a slice of that cache. */
   advect(dt, medium, rise, refreshPerStep) {
     const p = this.pos, f = this.flow;
@@ -551,6 +620,8 @@ export class Signature {
 
     this._wakeShedAcc = 0;
     this._thermalShedAcc = 0;
+    this._wakeShedDist = 0;
+    this._thermalShedDist = 0;
     this._wakeRefresh = Math.max(1, Math.round(TRAIL.wakeCap / (TRAIL.flowRefreshSec * 120)));
     this._thermalRefresh = Math.max(1, Math.round(TRAIL.thermalCap / (TRAIL.flowRefreshSec * 120)));
 
@@ -595,7 +666,12 @@ export class Signature {
     this._kinematics(ship);
 
     this.bus.reset();
-    if (systems) systems.emit(this.bus, this.kin, ship);
+    // `dt` is passed as a fourth argument even though the documented interface is
+    // `emit(bus, kin, ship)`: the scan capacitor is a real store with a 1.5 s ramp
+    // and a 0.2 s pulse, and a system that has to guess the step in order to
+    // integrate is a system that quietly stops being right the day the step
+    // changes. Anything implementing the three-argument form still works.
+    if (systems) systems.emit(this.bus, this.kin, ship, dt);
 
     this._acoustic(dt);
     this._thermal(dt);
@@ -822,23 +898,46 @@ export class Signature {
    * the acoustic, photic and EM channels inside a couple of seconds and does
    * nothing whatsoever about the last three minutes, which is the single most
    * important asymmetry in the game.
+   *
+   * **Two gates, both required.** A parcel is shed only when the rate allows it
+   * *and* the ship has moved far enough through the medium to have torn new air.
+   * See `TRAIL.wakeShedM` for why — without the second gate a parked ship is the
+   * loudest thing in the game.
    */
   _shed(dt, ship) {
     const p = ship.position;
-    this._wakeShedAcc += dt;
+    const travelled = this.kin.relSpeed * dt;
+    this._wakeShedDist += travelled;
+    this._thermalShedDist += travelled;
+
     const wakePeriod = 1 / TRAIL.wakeShedHz;
+    this._wakeShedAcc = Math.min(this._wakeShedAcc + dt, wakePeriod);
     if (this._wakeShedAcc >= wakePeriod) {
-      this._wakeShedAcc -= wakePeriod;
+      this._wakeShedAcc = 0;
       const tau = TRAIL.wakeTauBase / (1 + TRAIL.wakeTauTurbGain * this.turbulence);
-      this.wakeTrail.shed(p.x, p.y, p.z, this.wake, tau, this.time, this.medium);
+      if (this._wakeShedDist >= TRAIL.wakeShedM) {
+        // Subtract rather than zero, so a speed a hair under cruise sheds at a
+        // steady 4 Hz instead of stuttering. Capped at one spacing of credit, so
+        // stopping cannot pay for more than one extra parcel.
+        this._wakeShedDist = Math.min(this._wakeShedDist - TRAIL.wakeShedM, TRAIL.wakeShedM);
+        this.wakeTrail.shed(p.x, p.y, p.z, this.wake, tau, this.time, this.medium);
+      } else {
+        this.wakeTrail.refresh(p.x, p.y, p.z, this.wake, tau, this.time, this.medium);
+      }
     }
 
-    this._thermalShedAcc += dt;
     const thermPeriod = 1 / TRAIL.thermalShedHz;
+    this._thermalShedAcc = Math.min(this._thermalShedAcc + dt, thermPeriod);
     if (this._thermalShedAcc >= thermPeriod) {
-      this._thermalShedAcc -= thermPeriod;
-      this.thermalTrail.shed(p.x, p.y, p.z, this.thermal * TRAIL.thermalShedFraction,
-        TRAIL.thermalTau, this.time, this.medium);
+      this._thermalShedAcc = 0;
+      const v = this.thermal * TRAIL.thermalShedFraction;
+      if (this._thermalShedDist >= TRAIL.thermalShedM) {
+        this._thermalShedDist =
+          Math.min(this._thermalShedDist - TRAIL.thermalShedM, TRAIL.thermalShedM);
+        this.thermalTrail.shed(p.x, p.y, p.z, v, TRAIL.thermalTau, this.time, this.medium);
+      } else {
+        this.thermalTrail.refresh(p.x, p.y, p.z, v, TRAIL.thermalTau, this.time, this.medium);
+      }
     }
 
     this.wakeTrail.advect(dt, this.medium, 0, this._wakeRefresh);
@@ -980,6 +1079,7 @@ export class Signature {
         (d ? `  (${d.label} ${(d.share * 100).toFixed(0)}%)` : '');
     }
     out.exposure = this.exposure().total.toFixed(3);
+    if (this.bus.dropped > 0) out.warning = `${this.bus.dropped} emissions dropped — bus full`;
     return out;
   }
 }
