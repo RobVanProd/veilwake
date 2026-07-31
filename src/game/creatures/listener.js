@@ -393,10 +393,22 @@ export class Listener extends Creature {
     // and gets its own number: §10.1's listening window is 18–26 s and the
     // creature has to actually be still for it, so a stop that ate a quarter of
     // the window would make "it does not move" false in play.
+    //
+    // The brake is a CONSTANT magnitude, floored at the patrol speed, and that
+    // detail is the whole difference between the paragraph above being true and
+    // being aspirational. Written as `max(this.speed, 1) / stopSeconds` the rate
+    // shrank as the speed did, so the last metre per second took as long as the
+    // first four: measured, a creature entering a window from its 5 m/s patrol was
+    // still moving 5.1 s in and was fully stopped for only 73.2% of an 18–26 s
+    // window, against a docstring promising two seconds. Flooring the rate at
+    // `patrol / stopSeconds` makes the common case exactly the documented 2.0 s,
+    // and the snap removes an asymptote that no fixed step ever actually reaches.
+    const patrol = LISTENER.speedMps[STATE.UNAWARE];
     const rate = target > this.speed
       ? Math.max(target * target / (2 * this.bodyLength), 0.05)
-      : Math.max(this.speed, 1) / LISTENER.stopSeconds;
+      : Math.max(this.speed, patrol) / LISTENER.stopSeconds;
     this.speed += clamp(target - this.speed, -rate * dt, rate * dt);
+    if (target === 0 && this.speed < rate * dt) this.speed = 0;
 
     const want = this._desiredHeading(state, t);
     if (want !== null && this.speed > 1e-3) {
