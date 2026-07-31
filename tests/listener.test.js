@@ -27,6 +27,7 @@ import { Listener, LISTENER } from '../src/game/creatures/listener.js';
 import {
   STATE, STATE_ENTRY, stateExit, FAR_PLANE, MEDIUM_SAMPLE_BUDGET, SENSE_PERIOD,
   RNG_TAG, soundDelayS, createFlatMedium, countingMedium, createSignatureView,
+  promoteByDistance, enforceSingleCommitted, CEDE_CEILING,
 } from '../src/game/creatures/creature.js';
 
 const DT = 1 / 120;
@@ -675,6 +676,99 @@ function disciplineCases() {
 }
 
 // ---------------------------------------------------------------------------
+// Above the creature — §8 promotion and §11.1's one-COMMITTED rule
+//
+// These run the exact call order main.js uses, with the same helpers, against
+// three Listeners on one target. That page cannot be loaded in a headless
+// environment, so this is how much of the wiring can honestly be verified: the
+// logic, not the module graph, not the renderer, not the frame time.
+// ---------------------------------------------------------------------------
+
+function managerCases() {
+  const r = rig();
+  const rng = new Rng(90210);
+  const creatures = [];
+  for (let i = 0; i < 3; i++) {
+    creatures.push(new Listener({
+      id: i, rng: rng.fork(RNG_TAG.LISTENER), senseOffset: i % SENSE_PERIOD,
+      position: { x: 1400 + i * 10, y: 0, z: 0 }, territory: { x: 1400, z: 0 },
+    }));
+  }
+  const ctx = { tick: 0, t: FILL_S, medium: r.medium, signature: r.view,
+                shipPos: r.ship.position, shipVel: r.ship.velocity };
+  const order = [];
+
+  // Count sense ticks the way §8's budget is stated: per creature, per second.
+  let senses = 0;
+  const inner = creatures[0].sense.bind(creatures[0]);
+  creatures[0].sense = (c) => { senses++; return inner(c); };
+
+  let tick = 0, maxCommitted = 0, forced = 0;
+  const SECONDS = 500;
+  for (let i = 0; i < Math.round(SECONDS / DT); i++) {
+    r.sig.update(DT, r.ship, r.sys);
+    ctx.tick = tick; ctx.t = FILL_S + tick * DT;
+    if (tick % 30 === 0) promoteByDistance(creatures, r.ship.position, ctx, 6, order);
+    for (const c of creatures) c.update(DT, tick, ctx);
+    forced += enforceSingleCommitted(creatures, ctx);
+    const n = creatures.filter((c) => c.state === STATE.COMMITTED).length;
+    if (n > maxCommitted) maxCommitted = n;
+    tick++;
+  }
+
+  const committed = creatures.filter((c) => c.state === STATE.COMMITTED);
+  const logSize = creatures.reduce((n, c) => n + c.detectionLog().length, 0);
+
+  return [
+    {
+      name: 'promotion makes a creature sense at 10 Hz',
+      want: '10.0 /s',
+      got: `${(senses / SECONDS).toFixed(2)} /s`,
+      ok: near(senses / SECONDS, 10, 0.2),
+      note: `SENSE_PERIOD ${SENSE_PERIOD} at 120 Hz. Unpromoted it is exactly 0, which is ` +
+        'what every creature in the project did before main.js owned promotion',
+    },
+    {
+      name: 'promotion is logged, so nothing appears from nowhere',
+      want: '3 promotion entries',
+      got: `${creatures.reduce((n, c) => n + c.detectionLog().filter((e) => e.channel === 'promotion').length, 0)}`,
+      ok: creatures.every((c) => c.detectionLog().some((e) => e.channel === 'promotion')),
+      note: '§8. The entry carries the distance it was promoted at, which is what makes it ' +
+        'checkable against promotionRadius after the fact',
+    },
+    {
+      name: 'at most one creature is ever COMMITTED',
+      want: '≤ 1',
+      got: `${maxCommitted}`,
+      ok: maxCommitted <= 1,
+      note: `§6 and §11.1. Three identical probes on one target used to reach COMMITTED ` +
+        'simultaneously because nothing above the Creature class enforced it',
+      },
+    {
+      name: 'the creatures that cede are parked in TRACKING, not knocked down forever',
+      want: 'TRACKING at the ceiling',
+      got: creatures.filter((c) => c !== committed[0])
+        .map((c) => `${c.state} ${c.attention.toFixed(3)}`).join(', '),
+      ok: creatures.filter((c) => c !== committed[0])
+        .every((c) => c.attention <= CEDE_CEILING + 1e-9 && c.state === STATE.TRACKING),
+      note: `the ceiling is stateExit(COMMITTED) = ${CEDE_CEILING}, an existing constant. ` +
+        'Something else is still coming, and the moment the holder gives up it is one ' +
+        'percept from taking over',
+    },
+    {
+      name: 'ceding does not flood the detection log',
+      want: '≤ 3 forced demotions in 500 s',
+      got: `${forced} forced, ${logSize} log entries total`,
+      ok: forced <= 3,
+      note: 'the first version of enforceSingleCommitted demoted the losers and left their ' +
+        'attention at 1.00, so each re-committed on the next sense tick: 8729 forced ' +
+        'demotions in this exact run, which is what a 64-entry ring buffer full of noise ' +
+        'looks like and it destroys the only post-mortem the player gets',
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
 
 /** Run every case. Returns { pass, fail, results }. */
 export function run() {
@@ -687,6 +781,7 @@ export function run() {
     ...estimateCases(),
     ...behaviourCases(),
     ...disciplineCases(),
+    ...managerCases(),
   ];
   return {
     pass: results.filter((r) => r.ok).length,

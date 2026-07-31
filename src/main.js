@@ -16,12 +16,20 @@ import { Loop } from './core/loop.js';
 import { Rng, seedFrom } from './core/rng.js';
 import { BUDGET } from './core/perf.js';
 import { CloudSystem } from './render/clouds.js';
+import { shipLamp, thrusterPlume } from './render/lights.js';
 import { Flight } from './game/flight.js';
 import { ShipCamera } from './game/camera.js';
 import { Controls } from './game/controls.js';
 import { Input } from './core/input.js';
 import { Pointer } from './core/pointer.js';
 import { Gamepad } from './core/gamepad.js';
+import { Signature } from './game/signature.js';
+import { ShipSystems } from './game/systems.js';
+import { Listener } from './game/creatures/listener.js';
+import {
+  createMedium, countingMedium, createSignatureView, formatEvent,
+  promoteByDistance, enforceSingleCommitted, RNG_TAG,
+} from './game/creatures/creature.js';
 
 const canvas = document.getElementById('gl');
 const diagEl = document.getElementById('diag');
@@ -75,6 +83,73 @@ const shipCam = new ShipCamera(camera);
 ship.position.set(0, 140, 0);
 
 // ---------------------------------------------------------------------------
+// Signature, systems, creatures
+//
+// **UNVERIFIED.** Everything from here to the end of this block was written
+// without a GPU, a browser or a display, so it has never been loaded. Every
+// module it wires has been measured headless — 114 cases in tests/index.html
+// pass in node — but the wiring itself has not, and a broken module graph has
+// taken this page down before. The first browser pass should check, in order:
+// that the page boots at all, that GAME.sig() returns six channels that move
+// with the throttle, that GAME.creatureStates() shows a Listener promoted to
+// 'full' when it is close, and that the frame time survives the plume light.
+//
+// On that last point, from the audit and NOT re-measurable here: the volumetric
+// pass costs about +1.57 ms per active light and blows its 7 ms budget at three.
+// MAX_MARCH_LIGHTS is still 8. It is left alone because those timings were taken
+// against a shader that was being rewritten during the audit and the audit says
+// so; re-measure with clouds.benchPass before trusting either number. The search
+// lamp is off by default, so the steady state here is one extra light (the
+// plume, and only above idle throttle).
+// ---------------------------------------------------------------------------
+
+const lampId = clouds.lights.add(shipLamp({ on: false }));
+const plumeId = clouds.lights.add(thrusterPlume({ on: false }));
+
+const signature = new Signature({ medium: clouds });
+const systems = new ShipSystems({ lights: clouds.lights, lampId });
+
+// createSignatureView must be given the RECORDER, not the Signature. Signature
+// has no sampleAt/at/historyAt, so the adapter would report hasHistory:false and
+// silently degrade to reading the present as though it were the past — which
+// destroys the propagation delay that the whole acoustic sense is built on.
+const sigView = createSignatureView(signature.recorder);
+const creatureMedium = countingMedium(createMedium(clouds));
+
+// One Listener, off to the side of the start point and patrolling its own
+// territory. Nothing spawns creatures yet; this exists so the layer is reachable
+// and so a capture can show a real detection log.
+const creatures = [
+  new Listener({
+    id: 0,
+    rng: rng.fork(RNG_TAG.LISTENER),
+    position: { x: 4200, y: 140, z: -3000 },
+    territory: { x: 4200, z: -3000 },
+    senseOffset: 0,
+  }),
+];
+
+/** Reused every step. Allocating one of these per creature per step is 120 Hz
+ *  of garbage in a game whose worst enemy is a collector pause mid-encounter. */
+const creatureCtx = {
+  tick: 0, t: 0, medium: creatureMedium, signature: sigView,
+  shipPos: ship.position, shipVel: ship.velocity,
+};
+
+// Promotion and the one-COMMITTED rule both live in creature.js, above the
+// Creature class, because a creature cannot see its peers — and because in here
+// they could not be tested, which is how both of them were wrong the first time.
+const PROMOTE_MAX = 6;
+/** Steps between promotion passes. A creature that crosses `promotionRadius`
+ *  (16.8 km for a FAR_PLANE sensor) at 20 m/s takes four minutes to cover the
+ *  4.8 km of margin the radius exists to provide, so 4 Hz is generous. */
+const PROMOTE_PERIOD = 30;
+const _promotionOrder = [];
+
+const LAMP_FWD = new THREE.Vector3();
+const LAMP_POS = new THREE.Vector3();
+
+// ---------------------------------------------------------------------------
 // A placeholder scene, purely to prove the pipeline.
 //
 // Nothing here survives into the game. It exists so that a capture has something
@@ -118,7 +193,7 @@ scene.add(markers);
 // ---------------------------------------------------------------------------
 const state = { heading: 0 };
 
-function update(dt) {
+function update(dt, tick) {
   pad.update();
   controls.update(dt).applyTo(ship);
 
@@ -140,6 +215,48 @@ function update(dt) {
   }
 
   ship.step(dt);
+
+  // AFTER ship.step and before anything reads the signature. _kinematics reads
+  // ship.velocity, gLoad and slipAngle, and flight.js only writes the last two
+  // at the end of step() — calling before it reads last frame's manoeuvre.
+  signature.update(dt, ship, systems);
+
+  // The ship's own lights. Position and direction belong here because this is
+  // what knows where the ship is pointing; whether they are ON belongs to
+  // ShipSystems, which publishes their lumens. A zero direction vector survives
+  // normalisation and turns a spot silently black while it still counts toward
+  // the signature, so these are seeded from the ship's forward axis and never
+  // from an unpopulated vector.
+  LAMP_FWD.copy(ship.forward);
+  LAMP_POS.copy(ship.position).addScaledVector(LAMP_FWD, 2.0);
+  clouds.lights.set(lampId, {
+    position: [LAMP_POS.x, LAMP_POS.y, LAMP_POS.z],
+    direction: [LAMP_FWD.x, LAMP_FWD.y, LAMP_FWD.z],
+  });
+  LAMP_POS.copy(ship.position).addScaledVector(LAMP_FWD, -3.0);
+  clouds.lights.set(plumeId, {
+    position: [LAMP_POS.x, LAMP_POS.y, LAMP_POS.z],
+    direction: [-LAMP_FWD.x, -LAMP_FWD.y, -LAMP_FWD.z],
+    intensity: 1.5 * (0.15 + 0.85 * ship.throttleSmoothed),
+    on: ship.throttleSmoothed > 0.01,
+  });
+
+  // Note the clock. `loop.simTime` is the time at the START of this step and
+  // `Signature` keeps its own, incremented at the top of its update, so
+  // signature.time runs exactly one step (8.3 ms) ahead of creatureCtx.t. That
+  // is a fortieth of the recorder's 0.5 s bucket and it is stated here rather
+  // than left for someone to find; if the two ever need to agree exactly, pass
+  // loop.simTime into signature.update rather than adjusting here.
+  loop.perf.begin('ai');
+  creatureCtx.tick = tick;
+  creatureCtx.t = loop.simTime;
+  if (tick % PROMOTE_PERIOD === 0) {
+    promoteByDistance(creatures, ship.position, creatureCtx, PROMOTE_MAX, _promotionOrder);
+  }
+  for (const c of creatures) c.update(dt, tick, creatureCtx);
+  enforceSingleCommitted(creatures, creatureCtx);
+  loop.perf.end('ai');
+
   controls.updateRumble(ship, { electrical: 0, damage: 0 });
   shipCam.update(ship, dt, loop.simTime);
 
@@ -197,15 +314,40 @@ loop.render = (alpha, frameMs) => {
     `fps ${s.fps.toFixed(0)}  med ${s.median.toFixed(2)}  p95 ${s.p95.toFixed(2)}  p99 ${s.p99.toFixed(2)}\n` +
     `worst ${s.worst.toFixed(1)}  hitches ${s.hitches}\n` +
     `draws ${info.render.calls}  tris ${info.render.triangles}\n` +
-    `t ${loop.simTime.toFixed(1)}s\n` +
+    `t ${loop.simTime.toFixed(1)}s  ai ${(loop.perf.marks.get('ai') ?? 0).toFixed(3)}ms\n` +
+    // A capture that cannot say which lights were live is not evidence of
+    // anything, and neither is one that cannot say what the ship was emitting.
+    `lights ${JSON.stringify(clouds.lights.debugSummary().keys)}\n` +
+    `sig ac ${signature.acoustic.toFixed(1)} th ${signature.thermal.toFixed(1)} ` +
+    `ph ${signature.photic.toFixed(0)} em ${signature.em.toFixed(2)} wk ${signature.wake.toFixed(2)}\n` +
+    creatures.map((c) => `${c.archetype}#${c.id} ${c.state} ${c.attention.toFixed(2)} ` +
+      `${c.simLevel}${c.silent ? ' LISTENING' : ''}`).join('\n') + '\n' +
     (v.length ? `<span class="bad">${v.join('; ')}</span>` : 'budget ok');
 };
 
 globalThis.GAME = {
   THREE, renderer, scene, camera, loop, rng, BUDGET, clouds,
   ship, controls, shipCam, input, pointer, pad,
+  lights: clouds.lights,
+  signature, systems, creatures,
   stats: () => loop.perf.stats(),
   violations: () => loop.perf.violations(),
+
+  // --- the signature, as the player would read it -------------------------
+  // report() and breakdown() both allocate, so call them at 10 Hz or slower.
+  // signature.values() is safe per-frame; it returns a reused object.
+  sig: () => signature.report(),
+  sigBreakdown: (channel) => signature.breakdown(channel),
+  exposure: () => signature.exposure(),
+  trails: () => signature.trailStats(),
+
+  // --- §7 requires this by name -------------------------------------------
+  detectionLog: () => creatures
+    .flatMap((c) => c.detectionLog())
+    .sort((a, b) => a.simTime - b.simTime)
+    .slice(-64),
+  detectionLines: () => GAME.detectionLog().map(formatEvent),
+  creatureStates: () => creatures.map((c) => c.snapshot()),
 
   /** Advance the simulation to an exact time by whole fixed steps. */
   seek(seconds) {

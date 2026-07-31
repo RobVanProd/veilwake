@@ -757,6 +757,100 @@ export class Creature {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Above the creature
+//
+// Two rules the contract states and the base class structurally cannot keep,
+// because a `Creature` cannot see its peers. They live here rather than in
+// `main.js` for one reason: in `main.js` they cannot be tested, and both of them
+// were wrong the first time they were written.
+// ---------------------------------------------------------------------------
+
+/**
+ * §8. Decide which creatures are simulated in full this step.
+ *
+ * Nothing sets `simLevel` on its own and `update()` gates sensing on it, so a
+ * creature nobody promotes runs `sense()` zero times a second. Measured: a
+ * default creature senses 0 times in one second; a promoted one senses exactly
+ * 10, which is `SENSE_PERIOD` at 120 Hz and is the contract's rate.
+ *
+ * The nearest `max` inside their own `promotionRadius` go to 'full'. The radius
+ * is 1.4× the creature's longest sense range precisely so that nothing is ever
+ * promoted while already inside its own detection range — §8's "nothing appears
+ * from nowhere" — and every change is logged for the same reason.
+ *
+ * @param {Array}  creatures
+ * @param {object} shipPos
+ * @param {object} ctx        needs `tick` and `t` for the log entry
+ * @param {number} max
+ * @param {Array}  scratch    reused ordering buffer; pass one to allocate nothing
+ * @returns {number} how many levels changed
+ */
+export function promoteByDistance(creatures, shipPos, ctx, max = 6, scratch = []) {
+  scratch.length = 0;
+  for (let i = 0; i < creatures.length; i++) scratch.push(creatures[i]);
+  scratch.sort((a, b) => vdist(a.position, shipPos) - vdist(b.position, shipPos));
+  let changed = 0;
+  for (let i = 0; i < scratch.length; i++) {
+    const c = scratch[i];
+    const d = vdist(c.position, shipPos);
+    const want = (i < max && d <= c.promotionRadius) ? 'full' : 'reduced';
+    if (want === c.simLevel) continue;
+    const from = c.simLevel;
+    c.simLevel = want;
+    c.logPromotion(ctx, from, want, d);
+    changed++;
+  }
+  return changed;
+}
+
+/** While one creature is COMMITTED, nothing else may climb past this. */
+export const CEDE_CEILING = stateExit(STATE.COMMITTED);
+
+/**
+ * §6 and §11.1: at most one creature may be COMMITTED at a time.
+ *
+ * Two simultaneous committed pursuers produce a situation with no readable
+ * solution, which reads as unfair regardless of whether it is. The creature with
+ * the most attention keeps it and everything else cedes.
+ *
+ * **Ceding is a ceiling, not a demotion, and that distinction is the whole
+ * function.** The first version simply pushed the losers to SEARCHING and left
+ * their attention alone, so each one re-committed on its very next sense tick
+ * and was pushed down again — measured, 8729 forced demotions in a 500 s run
+ * with three creatures on one target, which flooded the 64-entry detection log
+ * with noise and destroyed the one thing §7 exists to provide. Holding attention
+ * below COMMITTED's entry instead costs one demotion per encounter and parks the
+ * runner-up in TRACKING, which is both legal and better drama: something else is
+ * still coming, and the moment the holder gives up it is one percept from taking
+ * over.
+ *
+ * @returns {number} how many creatures were forced down this call
+ */
+export function enforceSingleCommitted(creatures, ctx) {
+  let holder = null;
+  for (let i = 0; i < creatures.length; i++) {
+    const c = creatures[i];
+    if (c.state !== STATE.COMMITTED) continue;
+    if (holder === null || c.attention > holder.attention) holder = c;
+  }
+  if (!holder) return 0;
+  let forced = 0;
+  for (let i = 0; i < creatures.length; i++) {
+    const c = creatures[i];
+    if (c === holder) continue;
+    if (c.state === STATE.COMMITTED) {
+      // The attention comes down with the state, or the demotion is decorative —
+      // the same lesson as the natural fall out of COMMITTED in _resolveStates.
+      c.attention = Math.min(c.attention, stateExit(STATE.TRACKING));
+      c._transition(STATE.SEARCHING, ctx, null);
+      forced++;
+    }
+    if (c.attention > CEDE_CEILING) c.attention = CEDE_CEILING;
+  }
+  return forced;
+}
+
 /**
  * Wrap a medium so it counts its own sampling.
  *
