@@ -125,7 +125,13 @@ float vw_density(vec3 p, float detailLod, float soft, out float h, out vec4 w) {
     // texture: wisps and filaments trailing from the base, cauliflower at the
     // top where the cloud is still building.
     float e = mix(1.0 - dfbm, dfbm, clamp(h * 3.0, 0.0, 1.0));
-    d = vw_remap(d, e * uErosion.x * detailLod, 1.0);
+    // Erode the edges, not the core. Erosion is a hard threshold on a 16 m
+    // pattern; applied evenly it turns the body of a distant cloud into salt,
+    // because the ray is stepping tens of metres and each sample lands on a
+    // different side of the threshold. Restricted to where the cloud is already
+    // thinning it produces the filaments it is there for and nothing else.
+    float k = uErosion.x * detailLod * (1.0 - smoothstep(0.30, 0.85, d)) * (1.0 - soft * 1.5);
+    d = vw_remap(d, e * max(k, 0.0), 1.0);
   }
 
   return d * uDensityScale;
@@ -229,7 +235,7 @@ vec3 vw_scatterEnergy(float lightDepth, float dens, float cosT) {
     // lost the sun's warmth to the surrounding blue, which is why the interior
     // of a real cloud is cool while its rim is not.
     e += a * beer * ph * mix(vec3(1.0), uDeepTint, float(i) * (1.0 / float(MS_OCTAVES)));
-    a *= 0.44; b *= 0.52; c *= 0.65;
+    a *= 0.36; b *= 0.42; c *= 0.62;
   }
   // The powder term: the dark band on the lit face, where light entering the
   // surface has not yet scattered back out. Only applied looking down-sun,

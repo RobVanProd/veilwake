@@ -91,10 +91,10 @@ const WIND = {
  * the depth reconstruction is happiest with.
  */
 export const CLOUD_QUALITY = {
-  low:    { scale: 0.42, steps: 64,  lightSteps: 3, msOctaves: 2, maxDist: 15000, minStep: 34, growth: 0.055, maxStep: 340, coarseMin: 110, tauCap: 1.1, softK: 0.0030, detailFade: [200, 900] },
-  medium: { scale: 0.50, steps: 96,  lightSteps: 4, msOctaves: 3, maxDist: 19000, minStep: 24, growth: 0.040, maxStep: 300, coarseMin: 80,  tauCap: 0.9, softK: 0.0026, detailFade: [400, 1800] },
-  high:   { scale: 0.50, steps: 136, lightSteps: 6, msOctaves: 3, maxDist: 24000, minStep: 16, growth: 0.030, maxStep: 260, coarseMin: 55,  tauCap: 0.7, softK: 0.0022, detailFade: [700, 3400] },
-  ultra:  { scale: 0.66, steps: 208, lightSteps: 8, msOctaves: 3, maxDist: 30000, minStep: 10, growth: 0.022, maxStep: 220, coarseMin: 36,  tauCap: 0.5, softK: 0.0018, detailFade: [1200, 6000] },
+  low:    { scale: 0.42, steps: 120, lightSteps: 3, msOctaves: 2, maxDist: 15000, minStep: 34, growth: 0.055, maxStep: 340, coarseMin: 110, tauCap: 1.1, softK: 0.0030, detailFade: [200, 800] },
+  medium: { scale: 0.50, steps: 176, lightSteps: 4, msOctaves: 3, maxDist: 19000, minStep: 24, growth: 0.040, maxStep: 300, coarseMin: 80,  tauCap: 0.9, softK: 0.0026, detailFade: [350, 1300] },
+  high:   { scale: 0.50, steps: 256, lightSteps: 6, msOctaves: 3, maxDist: 24000, minStep: 16, growth: 0.030, maxStep: 260, coarseMin: 55,  tauCap: 0.7, softK: 0.0022, detailFade: [500, 2000] },
+  ultra:  { scale: 0.66, steps: 384, lightSteps: 8, msOctaves: 3, maxDist: 30000, minStep: 10, growth: 0.022, maxStep: 220, coarseMin: 36,  tauCap: 0.5, softK: 0.0018, detailFade: [800, 3200] },
 };
 
 /**
@@ -107,16 +107,25 @@ export const CLOUD_QUALITY = {
  * Hue does the work that saturation would do badly.
  */
 export const CLOUD_PALETTE = {
-  sun: [2.35, 1.70, 1.14],
-  ambientTop: [0.115, 0.235, 0.360],
-  ambientBottom: [0.014, 0.033, 0.048],
-  deepTint: [0.52, 0.70, 1.00],
-  haze: [0.083, 0.126, 0.166],
-  skyZenith: [0.010, 0.028, 0.062],
-  skyHorizon: [0.092, 0.140, 0.184],
-  skyGround: [0.017, 0.030, 0.036],
-  stormFlash: [0.62, 0.74, 1.00],
-  stormEmber: [0.95, 0.40, 0.14],
+  // A low amber sun. Warmer and stronger than looks sensible as a number,
+  // because almost all of it is removed again by the extinction between the
+  // surface of a cloud and the point being shaded.
+  sun: [3.20, 1.86, 0.92],
+  // Sky light into the top of the layer, and the dim green-blue that comes back
+  // off whatever is underneath it. These are what a shadowed face is made of, so
+  // this is where the cold half of the palette has to live.
+  ambientTop: [0.075, 0.205, 0.400],
+  ambientBottom: [0.010, 0.030, 0.042],
+  // Light that has bounced several times has lost the sun's warmth to the blue
+  // around it. Above 1.0 in blue on purpose: it should read as a colour, not as
+  // a darker version of the sun.
+  deepTint: [0.30, 0.58, 1.15],
+  haze: [0.062, 0.104, 0.152],
+  skyZenith: [0.006, 0.020, 0.068],
+  skyHorizon: [0.070, 0.122, 0.180],
+  skyGround: [0.013, 0.026, 0.034],
+  stormFlash: [0.66, 0.78, 1.00],
+  stormEmber: [1.00, 0.36, 0.10],
 };
 
 const TAU = 6.28318530718;
@@ -159,7 +168,10 @@ export class CloudSystem {
     this.volumetric = true;
 
     this.origin = new THREE.Vector3(0, 0, 0);
-    this.sun = new THREE.Vector3(-0.38, 0.145, -0.912).normalize();
+    // Low and nearly ahead of the default heading. A high sun lights cloud tops
+    // and produces a postcard; a low one puts the light behind the forms, which
+    // is the only arrangement where you can see through one.
+    this.sun = new THREE.Vector3(-0.34, 0.085, -0.936).normalize();
     this.exposure = 1.0;
 
     /** Global coverage control. Gameplay writes this: a front rolling in is a
@@ -292,8 +304,8 @@ export class CloudSystem {
       uSigmaT: { value: 0.045 },
       uPowder: { value: 0.75 },
       uAerialK: { value: 9.0e-5 },
-      uLightStep: { value: 24 },
-      uLightFar: { value: 900 },
+      uLightStep: { value: 42 },
+      uLightFar: { value: 2400 },
       uStormPos: { value: [new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4()] },
       uStormCol: { value: [new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4()] },
     };
@@ -691,7 +703,8 @@ export class CloudSystem {
       let dfbm = D[0] * 0.625 + D[1] * 0.25 + D[2] * 0.125;
       dfbm = lerp(dfbm, D[3], 0.30);
       const e = lerp(1 - dfbm, dfbm, clamp01(h * 3));
-      d = remapG(d, e * f.erosion * detailLod, 1.0);
+      const k = f.erosion * detailLod * (1 - smoothstep(0.30, 0.85, d)) * (1 - soft * 1.5);
+      d = remapG(d, e * Math.max(k, 0), 1.0);
     }
     return d * f.densityScale;
   }
