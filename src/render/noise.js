@@ -9,6 +9,7 @@
 //   makeShapeVolume({ size, seed })   -> Volume   RGBA8, R = Perlin-Worley, GBA = Worley
 //   makeDetailVolume({ size, seed })  -> Volume   RGBA8, RGB = Worley, A = fine Perlin
 //   makeWeatherMap({ size, seed })    -> Map2D    RGBA8, see below
+//   makeBlueNoiseTile({ size, seed }) -> Map2D    RGBA8, greyscale dither mask
 //   sample3D(volume, u, v, w, out4)   -> trilinear, wrapping, channels in [0,1]
 //   sample2D(map, u, v, out4)
 //
@@ -22,12 +23,13 @@
 // ever-growing coordinate. Non-tiling noise would force world coordinates to
 // grow until float32 gives up somewhere over the horizon.
 //
-// Generation runs at load rather than from a baked file. A Python baker was the
-// alternative and was rejected: two implementations of the same noise is two
-// chances to diverge, and the CPU/GPU agreement guarantee above is worth more
-// than the ~250 ms this costs. The volumes are small for the same reason —
-// detail comes from layering a 32³ tile at 256 m over a 64³ tile at 4096 m, not
-// from one enormous texture.
+// Generation runs at load rather than from a baked file, and a Python baker in
+// tools/ was the alternative. It was rejected: two implementations of the same
+// noise is two chances for them to diverge, and the agreement guarantee above is
+// worth more than the ~750 ms this costs (shape 480, weather 110, detail 85,
+// blue noise 70, measured at 1080p on the development machine). The volumes are
+// small for the same reason — detail comes from layering a 32 cubed tile at
+// 256 m over a 64 cubed tile at 4096 m, not from one enormous texture.
 
 // ---------------------------------------------------------------------------
 // Hashing
@@ -133,8 +135,8 @@ function perlinFbm3(x, y, z, basePeriod, octaves, seed) {
  * cells. Because the distance is clamped at one cell, a feature point cannot
  * affect anything outside a sphere of that radius, so scattering each point into
  * its own sphere produces bit-identical output while touching roughly a third as
- * many voxels. On a 64 cubed volume that is the difference between this taking
- * 250 ms and taking 900.
+ * many voxels. On a 64 cubed volume that is three octaves in about 90 ms rather
+ * than 300.
  */
 function worleyVolume(size, freq, seed) {
   const n = size * size * size;
@@ -428,9 +430,9 @@ export function makeWeatherMap({ size = 128, seed = 3 } = {}) {
  * Blue noise puts its energy where the 3x3 upsample throws it away. The result
  * is grain rather than pattern, and grain at a quarter of the amplitude.
  *
- * 64 squared costs about a tenth of a second to build, which is most of what
- * this module spends on anything other than the shape volume. The size is the
- * knob if that ever needs to come down.
+ * 64 squared costs about seventy milliseconds to build. The size is the knob if
+ * that ever needs to come down; the algorithm is quadratic in the pixel count,
+ * so 32 squared is sixteen times cheaper and tiles visibly on a smooth gradient.
  */
 export function makeBlueNoiseTile({ size = 64, seed = 5 } = {}) {
   const n = size * size;
@@ -578,4 +580,3 @@ export function sample2D(map, u, v, out) {
   return out;
 }
 
-export { remap01 };

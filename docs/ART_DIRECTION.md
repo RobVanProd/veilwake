@@ -100,3 +100,45 @@ a region with a different character, or something enormous arriving.
 3. Is there a clear near / mid / far separation?
 4. Would a still from this be frightening *and* beautiful, or only one?
 5. Is anything grey that should be blue?
+
+---
+
+## Status after the first cloud pass (2026-07-30)
+
+The renderer is built and verified. The **look is not there yet**, and the gap is
+worth stating precisely rather than as a feeling.
+
+**What is right.** Density, self-shadowing, light transmission, wisps, layered
+structure at several scales, honest atmospheric perspective, and in-scattering
+computed properly — Henyey-Greenstein phase, multiple-scattering octaves, Beer's
+law, a powder term, and a light march for shadowing. Performance is 1.86 ms
+against a 7 ms budget, so there is room to spend on the look.
+
+**What is wrong, and why the first captures misled.** The showcase images were
+taken from *above* the cloud layer in high daylight, which is a flight-sim shot,
+not this game. Seen from *inside* the layer with the sun near the horizon — where
+the game actually lives — the same renderer produces the intended mood.
+Compare `evidence/baseline/clouds.png` (wrong) with
+`evidence/baseline/mood_inside_layer.png` (right). The palette constants were
+correct all along; the camera was not.
+
+**Consequence:** the default camera and the region's sun elevation are art
+direction, not scene setup. A region whose sun sits high enough to light the tops
+of the clouds evenly has no dread in it, whatever the palette says.
+
+**God rays: partial.** In-scattering is real and visible — the bloom through a
+gap in `evidence/baseline/inscatter_toward_sun.png` is genuinely occluded by
+density. But it reads as diffuse glow rather than as discrete shafts. Distinct
+beams need two things this pass does not yet do:
+
+1. **Sharper shadow contrast along the view ray.** Shafts are spatial *variation*
+   in in-scattered light, so the light march needs enough steps to resolve
+   hard-edged occluders rather than averaging them into a soft falloff.
+2. **Local light sources.** Every shaft in the game so far comes from the sun.
+   The ones that matter dramatically — the ship's own lamps, lightning inside the
+   cloud body, creature bioluminescence — do not exist yet, and those are the
+   ones tied to the signature system, where the shafts the player casts are the
+   evidence that they are broadcasting.
+
+Neither is a missing capability; both are a tuning-and-content pass on machinery
+that is already correct.

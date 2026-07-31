@@ -12,8 +12,9 @@
 //   clouds.concealmentAt(x, y, z)      how hidden something at that point is
 //   clouds.storms                      live electrical cells, world space
 //   clouds.setQuality(name)            'low' | 'medium' | 'high' | 'ultra'
+//   clouds.coverageAt(x, z)            weather-map coverage for a column
 //   clouds.verifyAgreement(renderer)   proves the CPU query matches the shader
-//   clouds.benchPass(renderer, scene, camera)   isolates the volumetric cost
+//   await clouds.benchPass(renderer, scene, camera)   times the march alone
 //
 // Three commitments shape everything below.
 //
@@ -40,7 +41,7 @@
 import * as THREE from 'three';
 import { makeShapeVolume, makeDetailVolume, makeWeatherMap, makeBlueNoiseTile, sample2D, sample3D } from './noise.js';
 import { FULLSCREEN_VERT, MARCH_FRAG, COMPOSITE_FRAG, PROBE_FRAG } from './shaders/cloud.glsl.js';
-import { clamp, clamp01, lerp, smoothstep } from '../core/math.js';
+import { clamp01, lerp, smoothstep } from '../core/math.js';
 import { seedFrom } from '../core/rng.js';
 
 // ---------------------------------------------------------------------------
@@ -633,9 +634,30 @@ export class CloudSystem {
     renderer.info.autoReset = prevAutoReset;
   }
 
-  _writeCameraUniforms(camera, renderer) {
+  /**
+   * Push this frame's field parameters to the shared uniform block.
+   *
+   * Separate from the camera write because anything that samples the field on
+   * the GPU needs it, not only a frame — the agreement probe most of all. It
+   * used to happen only inside renderFrame, which meant verifyAgreement()
+   * compared a freshly updated CPU field against whatever the shader had been
+   * left holding, and reported a disagreement that did not exist. A test that
+   * can fail for a reason unrelated to what it is testing is worse than no test.
+   */
+  _writeFieldUniforms() {
     const u = this.marchUniforms;
     const f = this.field;
+    u.uShapeAdvect.value.set(f.shapeAdvect[0], f.shapeAdvect[1], f.shapeAdvect[2]);
+    u.uDetailAdvect.value.set(f.detailAdvect[0], f.detailAdvect[1], f.detailAdvect[2]);
+    u.uWeatherAdvect.value.set(f.weatherAdvect[0], 0, f.weatherAdvect[2]);
+    u.uBreath.value.set(f.breath[0], f.breath[1], f.breath[2], f.breath[3]);
+    u.uCoverage.value.set(f.covGain, f.covBias);
+    u.uErosion.value.set(f.erosion, 0);
+    u.uDensityScale.value = f.densityScale;
+  }
+
+  _writeCameraUniforms(camera, renderer) {
+    const u = this.marchUniforms;
 
     camera.updateMatrixWorld();
     camera.getWorldPosition(this._v3);
@@ -651,13 +673,7 @@ export class CloudSystem {
     u.uClip.value.set(camera.near, camera.far);
     u.uSunDir.value.copy(this.sun).normalize();
 
-    u.uShapeAdvect.value.set(f.shapeAdvect[0], f.shapeAdvect[1], f.shapeAdvect[2]);
-    u.uDetailAdvect.value.set(f.detailAdvect[0], f.detailAdvect[1], f.detailAdvect[2]);
-    u.uWeatherAdvect.value.set(f.weatherAdvect[0], 0, f.weatherAdvect[2]);
-    u.uBreath.value.set(f.breath[0], f.breath[1], f.breath[2], f.breath[3]);
-    u.uCoverage.value.set(f.covGain, f.covBias);
-    u.uErosion.value.set(f.erosion, 0);
-    u.uDensityScale.value = f.densityScale;
+    this._writeFieldUniforms();
 
     // Jitter and dither phases are functions of simulation time, never of a
     // frame counter. Two captures seeked to the same time have to produce the
@@ -706,7 +722,8 @@ export class CloudSystem {
     const coverage = clamp01(W[0] * f.covGain + f.covBias + breath);
     if (coverage <= 0.001) return 0;
 
-    const wfbm = S[1] * 0.625 + S[2] * 0.25 + S[3] * 0.125;
+    let wfbm = S[1] * 0.625 + S[2] * 0.25 + S[3] * 0.125;
+    wfbm = lerp(wfbm, S[1], clamp01(soft * 1.8));
     const base = remapG(S[0], wfbm * 0.52 - 0.10 - soft, 1.0 + soft);
     const grad = heightGradient(h, W[1]);
 
@@ -839,6 +856,7 @@ export class CloudSystem {
     if (!gl.getExtension('EXT_color_buffer_float')) {
       return { ok: false, reason: 'EXT_color_buffer_float unavailable' };
     }
+    this._writeFieldUniforms();
 
     const pos = new Float32Array(count * 4);
     let seed = 0x1234567;
@@ -948,15 +966,40 @@ export class CloudSystem {
     // the driver has not been asked to submit, and polling for a result of work
     // that has not started is a loop that only ends when the timeout does.
     gl.flush();
-    const out = [];
-    for (const q of this._gpuQueries) {
-      for (let i = 0; i < 400; i++) {
-        if (gl.getQueryParameter(q, gl.QUERY_RESULT_AVAILABLE)) break;
-        await new Promise((r) => setTimeout(r, 2));
+
+    // Wait on the last query only. They complete in submission order, so once it
+    // is ready the rest are too, and this is one wait instead of N.
+    //
+    // The wait yields through a MessageChannel, which took three attempts to get
+    // right and is worth writing down. A microtask spin never resolves: the
+    // browser submits the command buffer on a task, and spinning on microtasks
+    // starves exactly that task. setTimeout does yield to it, but a backgrounded
+    // or non-compositing tab — the situation this project is developed in —
+    // clamps it to a second, which turns a five-second benchmark into a
+    // ten-minute one. A message port is a real task and is not clamped.
+    const queries = this._gpuQueries;
+    if (queries.length) {
+      const last = queries[queries.length - 1];
+      const chan = new MessageChannel();
+      const yieldToTask = () => new Promise((resolve) => {
+        chan.port1.onmessage = () => resolve();
+        chan.port2.postMessage(0);
+      });
+      const deadline = performance.now() + 4000;
+      while (!gl.getQueryParameter(last, gl.QUERY_RESULT_AVAILABLE) && performance.now() < deadline) {
+        await yieldToTask();
       }
-      // A disjoint means the GPU was reset or clocked down mid-measurement; the
-      // result is meaningless and is dropped rather than averaged in.
-      const disjoint = gl.getParameter(this._gpuExt.GPU_DISJOINT_EXT);
+      chan.port1.close();
+      chan.port2.close();
+    }
+
+    // A disjoint means the GPU was reset or clocked down somewhere in this batch,
+    // which makes every timing in it meaningless. Read once — reading clears the
+    // flag, so asking per query would only ever catch the first one.
+    const disjoint = gl.getParameter(this._gpuExt.GPU_DISJOINT_EXT);
+
+    const out = [];
+    for (const q of queries) {
       if (!disjoint && gl.getQueryParameter(q, gl.QUERY_RESULT_AVAILABLE)) {
         out.push(gl.getQueryParameter(q, gl.QUERY_RESULT) / 1e6);
       }
@@ -987,6 +1030,8 @@ export class CloudSystem {
     camera.updateProjectionMatrix();
 
     const stats = (a) => {
+      // Null rather than zeros: a measurement that did not happen must not look
+      // like a fast one.
       if (!a.length) return null;
       const at = (p) => a[Math.min(a.length - 1, Math.round((p / 100) * (a.length - 1)))];
       return { median: +at(50).toFixed(3), p95: +at(95).toFixed(3), p99: +at(99).toFixed(3), samples: a.length };
@@ -1031,10 +1076,13 @@ export class CloudSystem {
         ts.sort((a, b) => a - b);
         return ts;
       };
-      const off = run(false), on = run(true);
+      const offStats = stats(run(false));
+      const onStats = stats(run(true));
       this.volumetric = true;
-      frame = stats(on);
-      march = { median: +(stats(on).median - stats(off).median).toFixed(3), p95: null, p99: null, samples: frames };
+      frame = onStats;
+      // A subtraction, because the readback fence has a large fixed cost of its
+      // own — around thirty milliseconds here — that is present in both halves.
+      march = { median: +(onStats.median - offStats.median).toFixed(3), p95: null, p99: null, samples: frames };
     }
 
     renderer.setSize(prevSize.x, prevSize.y, false);
@@ -1086,4 +1134,3 @@ function hashf(a, b, seed) {
   return (h >>> 0) / 4294967296;
 }
 
-export { clamp };

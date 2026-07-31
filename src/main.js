@@ -15,6 +15,7 @@ import * as THREE from 'three';
 import { Loop } from './core/loop.js';
 import { Rng, seedFrom } from './core/rng.js';
 import { BUDGET } from './core/perf.js';
+import { CloudSystem } from './render/clouds.js';
 
 const canvas = document.getElementById('gl');
 const diagEl = document.getElementById('diag');
@@ -46,12 +47,14 @@ renderer.toneMappingExposure = 1.0;
 const MAX_DPR = 1.5;
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(0x0a1018, 0.0016);
+// No scene fog: the cloud composite applies its own aerial perspective to
+// geometry, and the two stack into a grey wash.
 
 const camera = new THREE.PerspectiveCamera(62, 1, 0.5, 12000);
 camera.position.set(0, 0, 0);
 
 const rng = new Rng(seedFrom('veilwake:phase0'));
+const clouds = new CloudSystem({ renderer, seed: 'veilwake', quality: 'high' });
 
 // ---------------------------------------------------------------------------
 // A placeholder scene, purely to prove the pipeline.
@@ -62,7 +65,9 @@ const rng = new Rng(seedFrom('veilwake:phase0'));
 // the tone mapping are all doing what they should.
 // ---------------------------------------------------------------------------
 const key = new THREE.DirectionalLight(0xbcd4ef, 2.2);
-key.position.set(-0.4, 0.75, 0.5);
+// The placeholder light follows the clouds' sun, so geometry and volume agree
+// about where the light is coming from.
+key.position.copy(clouds.sun);
 scene.add(key);
 scene.add(new THREE.HemisphereLight(0x9db6d6, 0x0a0f16, 0.55));
 
@@ -98,6 +103,7 @@ const state = { heading: 0 };
 function update(dt) {
   state.heading += dt * 0.06;
   markers.rotation.y = state.heading * 0.15;
+  clouds.update(dt, camera);
 }
 
 /** When set, render() uses this size instead of the element's. Capture only. */
@@ -122,7 +128,7 @@ function render() {
     sizeTo(Math.max(1, Math.round(canvas.clientWidth * dpr)),
            Math.max(1, Math.round(canvas.clientHeight * dpr)));
   }
-  renderer.render(scene, camera);
+  clouds.renderFrame(renderer, scene, camera);
 }
 
 const loop = new Loop({ hz: 120, update, render });
@@ -151,7 +157,7 @@ loop.render = (alpha, frameMs) => {
 };
 
 globalThis.GAME = {
-  THREE, renderer, scene, camera, loop, rng, BUDGET,
+  THREE, renderer, scene, camera, loop, rng, BUDGET, clouds,
   stats: () => loop.perf.stats(),
   violations: () => loop.perf.violations(),
 
