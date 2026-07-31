@@ -201,6 +201,7 @@ uniform vec2  uLightShape;   // shadow march growth per step, cone spread per me
 uniform vec4  uShaft;        // ambient mist gain, sun shaft gain, phase g, local light gain
 uniform vec4  uShaftStep;    // first shadow step, growth, sample stride, stride growth per metre
 uniform vec3  uShaftRange;   // fade start, fade end, shadow assumed beyond it
+uniform float uShaftSigma;   // extinction for the SHAFT shadow only, not the cloud body
 
 uniform int   uLightCount;
 uniform vec4  uLightPos[MAX_LIGHTS];   // xyz cloud space, w = 1/radius
@@ -514,7 +515,25 @@ vec3 vw_mist(vec3 rd, float a, float b, float cosT, float jit,
     tau = vw_shaftDepth(p, jit);
     tNext = mid + clamp(mid * uShaftStep.w, uShaftStep.z, uShaftStep.z * 9.0);
   }
-  float shadow = mix(exp(-uSigmaT * tau), uShaftRange.z, far) * (1.0 - far);
+  // The shaft shadow uses its own extinction, NOT the cloud's.
+  //
+  // They want opposite things and it took measuring to see it. The cloud body
+  // wants high extinction so a mass reads as opaque and keeps its form — that is
+  // what the mood pass raised uSigmaT to 0.16 for. But this term is a long, soft
+  // light path through broken cloud, and at 0.16 a mere thirty metres of density
+  // gives exp(-4.8) = 0.008: the shadow stops being a gradient and becomes a
+  // binary, fully lit or fully black, with no beam structure between them.
+  //
+  // Measured at the best shaft geometry in 4000 searched positions, with the sun
+  // gain held at 3.0, the fraction of frame the shafts touch: 5.2% at 0.16,
+  // 11.9% at 0.09, 38.3% at 0.045. Raising the cloud's extinction for the mood
+  // had silently removed the god rays.
+  //
+  // A lower coefficient here is also the physically honest one. Real shafts have
+  // soft graded edges precisely because multiple scattering fills their shadows
+  // back in, and a single-scatter transmittance through the local extinction is
+  // exactly the term that misses it.
+  float shadow = mix(exp(-uShaftSigma * tau), uShaftRange.z, far) * (1.0 - far);
 
   vec3 rad = uHazeColor * uShaft.x
            + uSunColor * (vw_shaftPhase(cosT) * uShaft.y * shadow);

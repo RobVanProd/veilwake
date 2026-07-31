@@ -323,7 +323,11 @@ export class CloudSystem {
      * the shadow stops being marched. Low on purpose — a high value floods the
      * distance with unshadowed light and flattens every shaft in front of it.
      */
-    this.shaft = { mist: 1.0, sun: 0.22, phaseG: 0.58, local: 45.0, farShadow: 0.30 };
+    // `sigma` is the shaft shadow's own extinction, deliberately far below the
+    // cloud body's uSigmaT. See the note at the shadow term in cloud.glsl.js:
+    // the body wants to be opaque and the shaft wants to be graded, and sharing
+    // one coefficient means raising the first silently deletes the second.
+    this.shaft = { mist: 1.0, sun: 1.6, phaseG: 0.58, local: 45.0, farShadow: 0.30, sigma: 0.045 };
 
     /** Local light sources the march samples. Bounded, chosen per frame; see
      *  lights.js. The ship, the creatures and this class's own storms all
@@ -468,6 +472,7 @@ export class CloudSystem {
       // through, and the single largest reason this pass read as a wash.
       uLightShape: { value: new THREE.Vector2(1.48, 0.16) },
       uShaft: { value: new THREE.Vector4() },
+      uShaftSigma: { value: 0.045 },
       uShaftStep: { value: new THREE.Vector4() },
       uShaftRange: { value: new THREE.Vector3() },
       uLightCount: { value: 0 },
@@ -571,6 +576,7 @@ export class CloudSystem {
     const q = this.preset;
     this.marchUniforms.uShaft.value.set(s.mist, s.sun, s.phaseG, s.local);
     this.marchUniforms.uShaftRange.value.set(q.shaftRange[0], q.shaftRange[1], s.farShadow);
+    this.marchUniforms.uShaftSigma.value = s.sigma;
   }
 
   _ensureTargets(renderer) {
