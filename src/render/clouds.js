@@ -132,7 +132,16 @@ export const CLOUD_PALETTE = {
   // *plateau*, not a spike, so nothing read as a highlight because everything
   // was one. Warmth is not deleted, only rationed: what survives here is the
   // last of it, and it lands on cloud edges as bone rather than gold.
-  sun: [2.55, 2.20, 1.55],
+  //
+  // Second pass, measured through the real gameplay camera rather than a
+  // hand-posed one: [2.55, 2.20, 1.55] still left the frame at warmth +13, and
+  // warmth is the exact quality the owner called "perky". Swept against the
+  // whole test objective — colder than this collapses the hue separation that
+  // makes shadow read as shadow (a [2.05, 2.20, 2.45] key scored warmth -18.6
+  // and separation 2.7, i.e. a monochrome frame), so this sits at the point where
+  // the light is just cool enough to stop being golden and still warm enough to
+  // separate from a cold shadow. Storm light, not sunset.
+  sun: [2.30, 2.24, 2.02],
   // Sky light into the top of the layer, and the dim green-blue that comes back
   // off whatever is underneath it. These are what a shadowed face is made of, so
   // this is where the cold half of the palette has to live. Cut hard — a shadow
@@ -223,12 +232,29 @@ export class CloudSystem {
     // Low and nearly ahead of the default heading. A high sun lights cloud tops
     // and produces a postcard; a low one puts the light behind the forms, which
     // is the only arrangement where you can see through one.
-    this.sun = new THREE.Vector3(-0.34, 0.085, -0.936).normalize();
+    // Low, and about 70 degrees off the default heading.
+    //
+    // Low is right and was always right: a high sun lights cloud tops and makes
+    // a postcard, a low one puts the light behind the forms and is the only
+    // arrangement you can see *through* one. The bearing was the mistake. It sat
+    // at 19 degrees off the heading — nearly straight ahead — so the player's
+    // default view was directly into the glare, and measured through the real
+    // gameplay camera that frame reads p50 153, litFrac 44%, warmth +21. The
+    // palette was never failing; the camera was pointed at the one direction
+    // that breaks it.
+    //
+    // Swept at the gameplay camera: 19 deg -> p50 153 / warm 21, 45 -> 125 / 17,
+    // 70 -> 95 / 13, 100 -> 76 / 7, 125 -> 69 / 4. Past about 90 the frame is
+    // calm but litFrac collapses to 4-5% and nothing blazes. 70 keeps 15% of the
+    // frame genuinely bright and the strongest hue separation of any bearing
+    // tested, which is rim-lit cloud against a dark sky — the shot this game is
+    // supposed to be made of.
+    this.sun = new THREE.Vector3(0.936, 0.087, -0.341).normalize();
     // Below 1 on purpose. The palette above does most of the darkening, but
     // exposure is what stops a cloud edge clipping to flat white the moment the
     // sun catches it — and a clipped highlight has no shape, so the biggest
     // forms in the game lose their form exactly where they are most lit.
-    this.exposure = 0.78;
+    this.exposure = 0.66;
 
     /** Global coverage control. Gameplay writes this: a front rolling in is a
      *  slow ramp here, and everything downstream — visibility, concealment,
@@ -237,7 +263,22 @@ export class CloudSystem {
     // sounds like an empty sky and is the opposite: it is what puts kilometres of
     // clear air between masses, which is the only way anything reads as
     // monumental. A sky that is cloud everywhere is a sky with no scale in it.
-    this.coverageGain = 2.20;
+    // 2.20 was too sparse to be a world. Measured along the view ray from the
+    // real gameplay camera it put ZERO cloud within 8 km ahead and 0% within
+    // 2.5 km around — the player flew through open sky and the frame was a grey
+    // gradient with a thin band of cumulus on the horizon. No palette can make
+    // dread out of an empty sky, and that, not the colour, was most of what
+    // "bland" meant.
+    //
+    // The cliff is sharp and sits just above here. Swept at the gameplay camera:
+    //   2.6 -> p50 32, dynamic 7.6, 9.7% blazing, separation 12
+    //   3.0 -> p50 15, dynamic 8.6, 0.1% blazing, separation -5.3
+    //   3.4 -> p50 15, dynamic 1.7, 0.0% blazing, separation -4.3
+    // Past 2.6 the masses close over each other, everything is occluded, nothing
+    // is lit, and the frame goes to featureless dark fog with the palette
+    // inverted. The original comment was right that clear air between masses is
+    // what makes them monumental — it just had the number one notch too low.
+    this.coverageGain = 2.60;
     this.coverageBias = -1.58;
     this.erosion = 0.44;
     this.densityScale = 1.0;
@@ -926,7 +967,21 @@ export class CloudSystem {
     const s = smoothstep(0.0, 0.7, h);
     out.x = lerp(WIND.shape.x, WIND.detail.x, s * 0.5) + WIND.weather.x * 0.25;
     out.z = lerp(WIND.shape.z, WIND.detail.z, s * 0.5) + WIND.weather.z * 0.25;
-    out.y = WIND.shape.y;
+    // Vertical flow comes ONLY from local convection, below. It used to start at
+    // WIND.shape.y, and that was a uniform 0.65 m/s updraft over the entire
+    // world — measured across 20000 points, p05 through p95 all read exactly
+    // 0.65 and 98.6% of samples were positive. Air cannot rise everywhere at
+    // once; horizontal wind can cross a world, vertical wind has nowhere to come
+    // from. Applied to the ship as an acceleration it made a perfectly level
+    // craft climb at a constant 5.1 m/s, which carried it from its spawn at
+    // y=140 to y=3303 in ten minutes with no input — out of the altitude band
+    // the whole palette was tuned in, which is most of why the art direction
+    // failed during real play while passing at a hand-posed camera.
+    //
+    // WIND.shape.y is untouched and still advects the noise, so the clouds go on
+    // boiling upward. What changed is only that the *pattern* rising is no
+    // longer reported as the *air* rising.
+    out.y = 0;
 
     // Local convection, estimated from the vertical density gradient. A core
     // that thickens with height is rising; one that thins is subsiding.

@@ -89,7 +89,14 @@ const shipCam = new ShipCamera(camera);
 // Start inside the cloud layer rather than above it. Where the camera sits is
 // art direction here, not scene setup: the same renderer looks like a flight sim
 // from above the layer and like this game from inside it.
-ship.position.set(0, 140, 0);
+// Spawn among the weather, not underneath it.
+//
+// This was y=140, which is below the deck: the player began under a ceiling,
+// looking up at the flat underside of everything, in the one part of the layer
+// with no form in it. A stress sweep measured the mood across altitudes and
+// found y≈900 is the best in the world and that it degrades sharply below ~600 —
+// so the opening shot was being taken in the worst band available.
+ship.position.set(0, 700, 0);
 
 // ---------------------------------------------------------------------------
 // A placeholder scene, purely to prove the pipeline.
@@ -147,6 +154,16 @@ function update(dt) {
     ? clouds.densityAt(ship.position.x, ship.position.y, ship.position.z) : 0;
   if (flow) {
     TURB.set(flow.x, flow.y, flow.z).multiplyScalar(2.4 * (0.25 + density));
+    // Vertical coupling is deliberately weaker than horizontal. Convection in a
+    // towering cloud is genuinely one-directional — `dHere * towering` in
+    // flowAt is positive everywhere by construction, because that is what a
+    // rising column does — so a ship that answers it fully is carried upward
+    // every time it crosses one and never comes back down. Measured at full
+    // coupling it drifted 700 m to 1250 m in nine minutes with no input, out of
+    // the band the palette is tuned for. The updraught is still felt, and
+    // pointedly so when threading a tower; it just no longer accumulates into a
+    // one-way trip out of the weather.
+    TURB.y *= 0.35;
     // A little chop that scales with density and speed, so thick cloud is
     // physically harder to fly through and the player can feel where they are.
     const chop = density * Math.min(ship.speed / 120, 1.5) * 3.2;

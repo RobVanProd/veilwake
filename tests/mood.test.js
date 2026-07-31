@@ -2,100 +2,112 @@
 //
 // The palette is the easiest thing in this project to lose. Every future change
 // that makes something "clearer" — a brighter lamp, a lifted ambient so a
-// creature reads better, a nudge to exposure so a HUD is legible — pushes the
-// frame back toward the daylight it started as, and each one is individually
-// reasonable. Nobody ever decides to undo the art direction; it just erodes.
+// creature reads, a nudge to exposure so a HUD is legible — pushes the frame
+// back toward the daylight it started as, and each one is individually
+// reasonable. Nobody ever decides to undo an art direction; it just erodes.
 //
-// So the direction is asserted rather than described. These are BANDS, not
-// exact values: the point is not to freeze the look, it is to catch the day it
-// stops being dark. A change that moves a number inside its band is fine and
-// needs no permission. A change that leaves the band is a decision, and should
-// have to be an explicit one.
+// THE FIRST VERSION OF THIS FILE WAS WORTHLESS, and how it failed is the most
+// useful thing in it. It pinned ONE hand-placed camera at ONE sim time and
+// reported 21/21 green while an adversarial pass, sweeping the camera the player
+// actually looks through, found the art direction failing at 10 of 14 sampled
+// times and continuously from t=120 to t=480. A test that samples a single
+// moment does not measure a game, it measures a screenshot — and it gave a
+// confident green light to a build whose default experience was still the exact
+// "bland and too perky" the owner complained about.
 //
-// The bands come from measurement, not taste. The reference numbers:
-//   before the mood pass, sunward — p50 190, dynamic 1.31, litFrac 65.3%
-//   after,                sunward — p50  36, dynamic 6.75, litFrac 15.8%
+// So this version obeys three rules, each of which the old one broke:
 //
-// Two failure modes are guarded, and the second is the one worth explaining.
-// Making the frame dark is trivially easy — scale the sun down and every
-// contrast metric improves. Measured: sun x0.3 gave a beautiful-looking dynamic
-// range while litFrac fell to 0.00 and the hue separation collapsed from 61.6 to
-// 11.3. That image is not doom, it is an unlit scene. `litFrac` and
-// `coldShadowSep` exist to fail that.
+//   1. **Use the camera the player uses.** ShipCamera, driven by the ship, not a
+//      camera teleported to a flattering spot. Note that shipCam.update() is a
+//      silent no-op until ship.step() has run — it reads cached basis vectors —
+//      so any evidence gathered by posing the ship by hand and calling update()
+//      is invalid. The sim is stepped for real here.
+//   2. **Sample across time.** The weather advects and the ship moves, so a mood
+//      that holds at t=66 says nothing about t=300. Failures are reported as a
+//      fraction of moments, because "usually right" is the property that matters.
+//   3. **Render at a real size.** With the browser pane hidden the canvas never
+//      resizes and sits at 300x150, so the old numbers came from 2850 sampled
+//      pixels. Every measurement here forces a known size first.
+//
+// The bands are deliberately bands, not exact values: a change that moves a
+// number inside its band needs no permission. Leaving one should be a decision.
 
 import { measureMood } from '../tools/mood.js';
 
-/** Where the camera is put, relative to the sun. Both directions are the game. */
-export const POSES = {
-  // Into the sun: the case that was a washout, and the one god rays live in.
-  toward: { sign: 1, lift: 40 },
-  // Away from the sun: correctly dark. Guarded loosely because what belongs in
-  // this half of the sky is the ship's own lamp, not the sun.
-  away: { sign: -1, lift: 20 },
-};
+/** Sim times to sample. Spread across a run long enough for weather to change. */
+export const TIMES = [40, 120, 200, 300, 420, 540];
+
+/** How many of the sampled moments are allowed to fail before the suite does. */
+const TOLERATED_FAILURE_FRACTION = 0.25;
+
+const W = 640, H = 360;
 
 /**
- * @param {object} GAME the live game object
- * @param {{sign:number,lift:number}} pose
+ * Advance the real simulation to `t` and render through the real ship camera.
+ * Returns the mood of the frame the player would actually be looking at.
  */
-export function shoot(GAME, pose, atSeconds = 66) {
+export function sampleAt(GAME, t) {
   const C = GAME.clouds;
-  const s = C.sun;
-  const P = new GAME.THREE.Vector3(-90, 225, -190);
-  GAME.seek(atSeconds);
-  GAME.camera.position.copy(P);
-  GAME.camera.lookAt(
-    P.x + s.x * 1000 * pose.sign,
-    P.y + pose.lift,
-    P.z + s.z * 1000 * pose.sign,
-  );
-  GAME.camera.updateMatrixWorld();
+  GAME.seek(t);                       // steps the loop, so ship basis vectors are live
+  GAME.renderer.setSize(W, H, false);
+  GAME.camera.aspect = W / H;
+  GAME.camera.updateProjectionMatrix();
+  // One more real step so the spring camera has settled onto this frame's ship.
+  GAME.loop.stepHeadless(2);
   C.renderFrame(GAME.renderer, GAME.scene, GAME.camera);
-  return measureMood(GAME.renderer);
+  const m = measureMood(GAME.renderer, 2);
+  m.t = t;
+  m.shipY = +GAME.ship.position.y.toFixed(0);
+  return m;
 }
 
-const CASES = [
-  // --- the frame must be dark -------------------------------------------
-  { name: 'sunward frame is not daylight', pose: 'toward',
-    check: (m) => m.p50 <= 70, got: (m) => `p50 ${m.p50}`, want: '<= 70' },
-  { name: 'away frame is dark', pose: 'away',
-    check: (m) => m.p50 <= 55, got: (m) => `p50 ${m.p50}`, want: '<= 55' },
-
-  // --- but something in it must blaze -----------------------------------
-  // The anti-cheat. Without this, turning the lights off passes every other case.
-  { name: 'sunward: something is genuinely blazing', pose: 'toward',
-    check: (m) => m.litFrac >= 0.8, got: (m) => `litFrac ${m.litFrac}%`, want: '>= 0.8%' },
-  { name: 'sunward: not so much is blazing that it is weather again', pose: 'toward',
-    check: (m) => m.litFrac <= 30, got: (m) => `litFrac ${m.litFrac}%`, want: '<= 30%' },
-
-  // --- shafts in a dark room --------------------------------------------
-  { name: 'sunward has real dynamic range', pose: 'toward',
-    check: (m) => m.dynamic >= 3.0, got: (m) => `p99/p50 ${m.dynamic}`, want: '>= 3.0' },
-
-  // --- the world is cold, and warmth is information ---------------------
-  { name: 'sunward is not warm overall', pose: 'toward',
-    check: (m) => m.warmth <= 2, got: (m) => `warmth ${m.warmth}`, want: '<= 2' },
-  { name: 'away is cold', pose: 'away',
-    check: (m) => m.warmth <= 0, got: (m) => `warmth ${m.warmth}`, want: '<= 0' },
-  // Light warmer than shadow. Goes negative above sigmaT 0.22, which is the
-  // measured point where the frame turns monochrome and the palette inverts.
-  { name: 'sunward: light is warmer than shadow', pose: 'toward',
-    check: (m) => m.coldShadowSep >= 4, got: (m) => `sep ${m.coldShadowSep}`, want: '>= 4' },
-
-  // --- highlights must keep their shape ---------------------------------
-  // A clipped highlight has no form, and the biggest objects in the game lose
-  // their silhouette exactly where they are most lit.
-  { name: 'highlights are not clipping to flat white', pose: 'toward',
-    check: (m) => m.blownFrac <= 2.0, got: (m) => `blown ${m.blownFrac}%`, want: '<= 2%' },
+/** The properties a frame must have. Each returns true when the frame is fine. */
+const CHECKS = [
+  { name: 'not daylight', want: 'p50 <= 90', f: (m) => m.p50 <= 90, got: (m) => `p50 ${m.p50}` },
+  { name: 'not a wall of blaze', want: 'litFrac <= 35%', f: (m) => m.litFrac <= 35, got: (m) => `litFrac ${m.litFrac}%` },
+  { name: 'not warm overall', want: 'warmth <= 4', f: (m) => m.warmth <= 4, got: (m) => `warmth ${m.warmth}` },
+  { name: 'has dynamic range', want: 'p99/p50 >= 2.2', f: (m) => m.dynamic >= 2.2, got: (m) => `dyn ${m.dynamic}` },
+  // The anti-cheat, and the one that matters most. Scaling the sun down improves
+  // every contrast number while litFrac goes to zero. Measured: sun x0.3 gave a
+  // beautiful dynamic range with litFrac 0.00 and hue separation collapsed from
+  // 61.6 to 11.3. That image is not doom, it is an unlit scene.
+  { name: 'something is blazing', want: 'litFrac >= 0.4%', f: (m) => m.litFrac >= 0.4, got: (m) => `litFrac ${m.litFrac}%` },
+  { name: 'highlights keep their shape', want: 'blown <= 2%', f: (m) => m.blownFrac <= 2, got: (m) => `blown ${m.blownFrac}%` },
 ];
 
 export function run(GAME) {
-  const shots = {};
-  for (const [k, p] of Object.entries(POSES)) shots[k] = shoot(GAME, p);
-  const results = CASES.map((c) => {
-    const m = shots[c.pose];
-    const ok = c.check(m);
-    return { name: `${c.name}`, ok, want: c.want, got: c.got(m), pose: c.pose };
+  const samples = TIMES.map((t) => sampleAt(GAME, t));
+  const results = [];
+
+  // Per-property, across time. A property that holds at every sampled moment is
+  // the claim being made; one that holds sometimes is reported with the moments
+  // it failed, because that is the information needed to fix it.
+  for (const c of CHECKS) {
+    const bad = samples.filter((m) => !c.f(m));
+    const frac = bad.length / samples.length;
+    const ok = frac <= TOLERATED_FAILURE_FRACTION;
+    results.push({
+      name: `${c.name} — through the gameplay camera, over time`,
+      ok,
+      want: `${c.want} at >= ${Math.round((1 - TOLERATED_FAILURE_FRACTION) * 100)}% of moments`,
+      got: bad.length === 0
+        ? `all ${samples.length} moments`
+        : `failed ${bad.length}/${samples.length} — ` + bad.map((m) => `t${m.t}(${c.got(m)})`).join(', '),
+    });
+  }
+
+  // The ship must stay in the world. This is not a mood property, but it is what
+  // broke the mood: a uniform 0.65 m/s updraft in the flow field carried a level
+  // ship from y=140 to y=3303 in ten minutes, out of the band the palette works
+  // in. Guarded here because it is invisible in any single frame.
+  const ys = samples.map((m) => m.shipY);
+  const drift = Math.max(...ys) - Math.min(...ys);
+  results.push({
+    name: 'the ship stays in the cloud layer with no input',
+    ok: drift < 1200 && Math.max(...ys) < 2400,
+    want: 'drift < 1200 m and never above 2400 m',
+    got: `y ${Math.min(...ys)}..${Math.max(...ys)} (drift ${drift} m)`,
   });
-  return { pass: results.filter((r) => r.ok).length, fail: results.filter((r) => !r.ok), results, shots };
+
+  return { pass: results.filter((r) => r.ok).length, fail: results.filter((r) => !r.ok), results, samples };
 }

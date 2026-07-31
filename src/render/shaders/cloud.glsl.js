@@ -208,6 +208,7 @@ uniform vec4  uLightCol[MAX_LIGHTS];   // rgb premultiplied by intensity, a = sh
 uniform vec4  uLightDir[MAX_LIGHTS];   // xyz cone axis, w = cos(outer half-angle)
 uniform vec4  uLightPar[MAX_LIGHTS];   // cos(inner), range squared, shadow march reach, spare
 uniform float uLightCutoff;            // below this a light is not worth shadowing
+uniform float uLightSubDiv;            // mist sub-samples per metre of span, for local lights
 
 uniform sampler2D uBlueNoise;
 
@@ -252,7 +253,7 @@ float vw_lightMarch(vec3 p, float soft, float jit) {
   // Dither the start. With the cone narrowed the shadow keeps its edges, and a
   // fixed start puts those edges on a shell at a fixed distance from every
   // sample, which reads as contour lines across the lit face of a cloud.
-  float t = step * (0.25 + 0.75 * jit);
+  float t = step * (0.45 + 0.55 * jit);
   float h; vec4 w;
   for (int i = 0; i < LIGHT_STEPS; i++) {
     // The cone still widens with distance, so a shadow softens with range
@@ -291,7 +292,7 @@ float vw_shaftDepth(vec3 p, float jit) {
   // the image as per-pixel noise, and the mist is a smooth surface across which
   // that reads as stipple rather than as grain. The other half of the fix is a
   // short first step: what is not sampled cannot be noisy.
-  float t = step * (0.30 + 0.70 * jit);
+  float t = step * (0.42 + 0.30 * jit);
   float h; vec4 w;
   for (int i = 0; i < SHAFT_STEPS; i++) {
     // Much less contrast rolloff than the view march uses at the same step
@@ -333,9 +334,18 @@ float vw_shaftPhase(float c) {
 // metres away, so the interval is known and bounded and a handful of even taps
 // resolves it; the exponential schedule the sun uses would put most of its
 // samples past the light itself.
-float vw_localDepth(vec3 p, vec3 dir, float dist, float soft, float jit) {
+float vw_localDepth(vec3 p, vec3 dir, float dist, float soft) {
   float step = dist / float(LIGHT_SHADOW_TAPS);
-  float t = step * (0.2 + 0.6 * jit);
+  // Not dithered, unlike the two marches above, and the reason is worth stating
+  // because the first version was and it put a coarse stipple across every
+  // hundred metres a lamp could reach. Dithering buys freedom from banding, and
+  // banding needs samples that land on fixed shells. These do not: the step is
+  // the distance to the light divided by the tap count, so it varies
+  // continuously with the sample's own position and adjacent samples already
+  // probe the field in slightly different places. There was nothing to fix, and
+  // the noise it added went straight into a smooth medium where the eye is very
+  // good at seeing it.
+  float t = step * 0.5;
   float depth = 0.0;
   float h; vec4 w;
   for (int i = 0; i < LIGHT_SHADOW_TAPS; i++) {
@@ -354,7 +364,7 @@ float vw_localDepth(vec3 p, vec3 dir, float dist, float soft, float jit) {
 // around each lamp. Along a twenty-kilometre ray that is a handful of the
 // hundred-odd sample points, which is the difference between this being
 // affordable and not.
-vec3 vw_localLights(vec3 p, vec3 rd, float soft, float jit) {
+vec3 vw_localLights(vec3 p, vec3 rd, float soft) {
   vec3 sum = vec3(0.0);
   for (int i = 0; i < MAX_LIGHTS; i++) {
     if (i >= uLightCount) break;
@@ -388,13 +398,49 @@ vec3 vw_localLights(vec3 p, vec3 rd, float soft, float jit) {
     // saturates to 1 without needing a branch on the light's kind.
     float cone = smoothstep(dir.w, par.x, dot(-L, dir.xyz));
     if (cone <= 0.0) continue;
+    // Squared. A smoothstep already has zero slope at the outer edge, but in a
+    // medium being integrated along the view ray even that reads as the surface
+    // of a cone rather than as light, because the eye is being shown the
+    // boundary of a solid of revolution. Squaring pulls the energy toward the
+    // axis and leaves the edge to fade over most of the cone's width.
+    cone *= cone;
 
     vec4 col = uLightCol[i];
     vec3 e = col.rgb * (att * cone * vw_shaftPhase(dot(L, rd)));
 
-    if (col.a > 0.0 && max(max(e.r, e.g), e.b) > uLightCutoff) {
-      float d = vw_localDepth(p, L, min(r, par.z), soft, jit);
-      e *= mix(1.0, exp(-uSigmaT * d), col.a);
+    // Fade the occlusion in across the cutoff rather than switching it on there.
+    // A hard switch would put a contour in the image wherever a beam's
+    // contribution crosses the threshold, and since it is a per-sample decision
+    // in a march whose sample positions are dithered per pixel, that contour
+    // would arrive as noise rather than as an edge. Measured against the stipple
+    // that prompted it this changed nothing — the cause was elsewhere, below —
+    // but a binary decision per sample in a dithered march is the wrong shape
+    // for this shader and it costs nothing to not have one.
+    // Gate on what the frame will actually receive, not on the raw radiance.
+    //
+    // e is the radiance at the sample. What reaches the image is that radiance times
+    // the gain the path applies, and for the path that draws the beam — the mist
+    // in vw_mist — that gain is uShaft.w, currently 45. Comparing the ungained
+    // number against uLightCutoff therefore asked the wrong question, and it had a
+    // visible consequence once the ship lamp was authored to reach eight hundred
+    // metres instead of dying at two: at 600 m along the beam the unoccluded
+    // radiance is 0.031, the old gate put that at smoothstep(0.012, 0.05, 0.031)
+    // = 0.5, and the last two hundred metres of the beam was drawn half
+    // unshadowed. That is the same failure the palette pass fixed for the sun —
+    // light visibly passing through a cloud that should have stopped it — except
+    // it was the player's own lamp doing it, in the part of the beam furthest from
+    // the ship, which is exactly where a beam is read as evidence about what is
+    // out there.
+    //
+    // Multiplying by the gain is what makes uLightCutoff mean "too faint to see",
+    // which is what a cutoff should mean. Measured cost of the wider gate at
+    // 1920x1080, quality high, two ship lamps in frame with the beam crossing a
+    // cloud bank: see the note by shipLamp in lights.js.
+    float bright = max(max(e.r, e.g), e.b) * uShaft.w;
+    float sh = col.a * smoothstep(uLightCutoff * 0.6, uLightCutoff * 2.5, bright);
+    if (sh > 0.0) {
+      float d = vw_localDepth(p, L, min(r, par.z), soft);
+      e *= mix(1.0, exp(-uSigmaT * d), sh);
     }
     sum += e;
   }
@@ -479,7 +525,34 @@ vec3 vw_mist(vec3 rd, float a, float b, float cosT, float jit,
   // is a thin extension of the cloud field rather than clean air, which is what
   // it is; the cloud samples below do not get it, because the cloud already has
   // a real scattering coefficient of its own.
-  if (uLightCount > 0) rad += vw_localLights(p, rd, 0.0, jit) * uShaft.w;
+  //
+  // Sub-sampled, unlike the sun, and only where there is something to sample.
+  // The sun's shadow varies over the size of the gaps between clouds, which is
+  // hundreds of metres and comfortably larger than a stride. A lamp's beam is
+  // tens of metres wide, so a ray that crosses one instead of travelling along
+  // it can pass through the whole thing inside a single stride, and since the
+  // stride is offset per pixel, whether it lands in the beam would be decided by
+  // the dither. That is a beam being missed rather than aliased, and no filter
+  // recovers it.
+  //
+  // Honest caveat: this was added chasing a stipple at the far end of a beam and
+  // did not remove it — sweeping the divisor from a sample every forty metres to
+  // one every three moved the measured high-frequency energy by under half a per
+  // cent. It is kept because the failure it prevents is real and cheap to
+  // prevent; the stipple has a different cause, recorded at the end of this file.
+  //
+  // The count is bounded and driven by the span, so the far field where the
+  // strides are long but no light is in range still costs one distance test per
+  // light and nothing else.
+  if (uLightCount > 0) {
+    int taps = int(clamp(ceil((b - a) * uLightSubDiv), 1.0, 5.0));
+    vec3 loc = vec3(0.0);
+    for (int i = 0; i < 5; i++) {
+      if (i >= taps) break;
+      loc += vw_localLights(uCamPos + rd * mix(a, b, (float(i) + 0.5) / float(taps)), rd, 0.0);
+    }
+    rad += loc * (uShaft.w / float(taps));
+  }
 
   return rad * (1.0 - exp(-uAerialK * (b - a)));
 }
@@ -543,7 +616,18 @@ void main() {
   // search rewinds t whenever it finds something, and without this the span it
   // rewinds over would be integrated twice — as a bright bar in front of every
   // cloud the ray enters, in exactly the place the eye is reading the silhouette.
-  float tMist = t;
+  //
+  // t0, not t. The march deliberately starts up to one stride late so its
+  // samples are offset per pixel, and initialising this to the offset start
+  // instead threw away that first stride of mist entirely — a different length
+  // in every pixel. For the sun that is invisible: the segment is at the very
+  // front of the ray where the mist has barely any weight, and the radiance
+  // across it is smooth. For a lamp mounted on the ship it is the brightest
+  // fifty metres of the beam, dropped at random, and it came out as a coarse
+  // stipple across the whole near field that no amount of extra sampling
+  // anywhere else could remove — because the samples were not where the problem
+  // was.
+  float tMist = t0;
   float shaftTau = 0.0;
   float tShaftNext = -1.0;
 
@@ -642,11 +726,26 @@ void main() {
     vec3 amb = mix(uAmbBottom, uAmbTop, h) * (0.30 + 0.70 * exp(-(1.0 - h) * 1.7));
 
     vec3 radiance = uSunColor * energy + amb;
-    // No mist gain here: the cloud has a real scattering coefficient, so a lamp
-    // inside one is already hundreds of times better lit than the same lamp in
-    // the gap beside it. Applying the mist's legibility gain on top would make
-    // flying into cloud with the lights on a white-out.
-    if (uLightCount > 0) radiance += vw_localLights(p, rd, soft, jit2);
+    // Local lights, at the excess over what the mist term above has already
+    // accounted for.
+    //
+    // The mist scatters local light at an effective coefficient of
+    // uAerialK * uShaft.w — that gain is what makes a beam visible in air this
+    // thin — and it does so along the whole ray, cloud or not. The cloud has a
+    // real coefficient of its own, uSigmaT * d, and adding a lamp again at full
+    // strength here would count the thin end twice.
+    //
+    // Worse than twice: without the subtraction the two paths differ by the
+    // whole gain, forty-five to one, and which one a sample takes is decided by
+    // whether its density is above zero — a decision made per sample, in a march
+    // whose sample positions are dithered per pixel. A discontinuity that large
+    // sitting on a per-pixel coin toss is the shape every stipple in this shader
+    // has had. Subtracting what the mist already contributed makes the two agree
+    // across the boundary instead of stepping.
+    if (uLightCount > 0) {
+      float excess = max(0.0, 1.0 - (uAerialK * uShaft.w) / max(uSigmaT * d, 1e-5));
+      if (excess > 0.0) radiance += vw_localLights(p, rd, soft) * excess;
+    }
 
     float tr = exp(-uSigmaT * d * ds);
     // Analytic integration of the in-scatter across the step, for a medium whose
@@ -683,6 +782,28 @@ void main() {
   float mistT = (dz < 1.0) ? 1.0 : exp(-uAerialK * (tEnd - t0));
   fragColor = vec4(scatter, clamp(trans * mistT, 0.0, 1.0));
 }
+
+// Known artefact, recorded because it is visible in
+// evidence/baseline/godrays.png and the next person should not have to rediscover
+// where it comes from.
+//
+// Where a local light illuminates a *thin* cloud edge — the last few hundred
+// metres of a lamp beam grazing a wisp — the lit vapour picks up a per-pixel
+// stipple. It is not the light: the falloff, the cone and the phase function are
+// all smooth in position, the occlusion march was ruled out by disabling it
+// (no measurable change), sub-sampling the span was ruled out by sweeping it
+// (no measurable change), and the shadow cone and the erosion strength were both
+// ruled out the same way. What is left is the running transmittance the mist
+// term is weighted by: at a wisp the march's own per-pixel sample offsets make
+// trans differ by a per cent or so between neighbouring pixels, which is
+// invisible under the sun and haze and is not invisible when a local light is
+// multiplying that same weight by tens.
+//
+// Fixing it means either filtering the local-light channel more widely than the
+// depth-aware reconstruction can, or making the density march's transmittance
+// agree better between neighbouring pixels at low density — and the second is a
+// change to the density march, not to the lighting. Neither belongs in a
+// lighting pass.
 `;
 
 // ---------------------------------------------------------------------------
@@ -736,7 +857,15 @@ vec3 vw_sky(vec3 rd) {
   // A halo, not a disc. The sun is never seen in this game; what is seen is the
   // part of the sky it happens to be behind. Kept tight on purpose — a wide
   // bloom washes the hue straight back out of the sky it is sitting in.
-  col += uSunColor * (pow(mu, 16.0) * 0.045 + pow(mu, 220.0) * 0.30)
+  // The broad term was pow(mu, 16.0) * 0.045, which is still 10% of full
+  // strength 30 degrees off axis — a halo wide enough to fill a frame. Measured
+  // through the real gameplay camera it put the whole image at p50 151, litFrac
+  // 41% and warmth +22.6 with hue separation at exactly 0: an empty sepia sky,
+  // which is precisely the "bland and too perky" this palette exists to remove.
+  // The comment above was right about the principle and wrong about the number.
+  // Tighter and dimmer: the glow now falls to 10% by 12 degrees, so it reads as
+  // the sky being lit from a place rather than as a lamp pointed at the lens.
+  col += uSunColor * (pow(mu, 48.0) * 0.020 + pow(mu, 220.0) * 0.30)
        * smoothstep(-0.25, 0.05, rd.y);
   return col;
 }
