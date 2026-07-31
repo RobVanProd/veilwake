@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VEILWAKE — controller check</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 28px; background: #05070b; color: #b9c7da;
+    font: 13px/1.6 ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+  }
+  h1 { font-size: 15px; letter-spacing: .26em; color: #e6f0fb; margin: 0 0 4px; font-weight: 500; }
+  .sub { color: #6f8299; margin-bottom: 22px; }
+  .wait { color: #ffd08a; }
+  .ok { color: #8fe3a8; }
+  .bad { color: #ff8b8b; }
+  .grid { display: grid; grid-template-columns: 148px 1fr; gap: 5px 14px; align-items: center; max-width: 640px; }
+  .lbl { color: #6f8299; }
+  .bar { height: 12px; background: #101823; border: 1px solid #23334a; border-radius: 3px; position: relative; overflow: hidden; }
+  .bar > i { position: absolute; top: 0; bottom: 0; background: #4d9fd6; display: block; }
+  .bar.bi > i { background: #6fc7a8; }
+  .btns { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; max-width: 640px; }
+  .btn {
+    padding: 4px 8px; border: 1px solid #23334a; border-radius: 4px;
+    background: #0c131c; color: #55677e; font-size: 11px; min-width: 34px; text-align: center;
+  }
+  .btn.on { background: #1d3a52; border-color: #4d9fd6; color: #dff0ff; }
+  section { margin-bottom: 20px; }
+  button.act {
+    background: #14202e; color: #cfe2f5; border: 1px solid #2c4056; border-radius: 5px; padding: 7px 12px; cursor: pointer; font: inherit;
+  }
+  button.act:hover { background: #1b2b3d; }
+</style>
+</head>
+<body>
+<h1>VEILWAKE</h1>
+<div class="sub">controller check — standalone, no game code</div>
+
+<section id="status" class="wait">Waiting for a controller. <b>Press any button on it now</b> — browsers hide gamepads until you do.</section>
+
+<section>
+  <div class="grid" id="axes"></div>
+</section>
+
+<section>
+  <div class="lbl">buttons</div>
+  <div class="btns" id="buttons"></div>
+</section>
+
+<section>
+  <button class="act" id="rumble">test rumble</button>
+  <span id="rumbleNote" class="lbl"></span>
+</section>
+
+<script type="module">
+import { Gamepad, PAD } from '../src/core/gamepad.js';
+
+const pad = new Gamepad();
+const statusEl = document.getElementById('status');
+const axesEl = document.getElementById('axes');
+const btnEl = document.getElementById('buttons');
+
+const NAMES = ['A','B','X','Y','LB','RB','LT','RT','Back','Start','LS','RS','Up','Down','Left','Right','Guide'];
+
+const rows = [
+  ['left stick X', () => pad.axes.lx, true],
+  ['left stick Y', () => pad.axes.ly, true],
+  ['right stick X', () => pad.axes.rx, true],
+  ['right stick Y', () => pad.axes.ry, true],
+  ['left trigger', () => pad.triggers.left, false],
+  ['right trigger', () => pad.triggers.right, false],
+];
+const bars = rows.map(([label, , bi]) => {
+  const l = document.createElement('div'); l.className = 'lbl'; l.textContent = label;
+  const wrap = document.createElement('div'); wrap.className = 'bar' + (bi ? ' bi' : '');
+  const fill = document.createElement('i'); wrap.appendChild(fill);
+  axesEl.append(l, wrap);
+  return fill;
+});
+
+const btns = NAMES.map((n) => {
+  const d = document.createElement('div'); d.className = 'btn'; d.textContent = n;
+  btnEl.appendChild(d); return d;
+});
+
+document.getElementById('rumble').addEventListener('click', () => {
+  pad.pulse(0.9, 0.5);
+  document.getElementById('rumbleNote').textContent =
+    pad.connected ? ' — sent' : ' — no controller detected yet';
+});
+
+// Reported back so the state can be read without seeing this page.
+globalThis.PADCHECK = { pad, seen: false, id: '', report: () => ({
+  connected: pad.connected, id: pad.id, mapping: pad.mapping,
+  axes: { ...pad.axes }, triggers: { ...pad.triggers },
+  buttons: [...pad.buttons].map(i => NAMES[i] || i),
+  everSeen: globalThis.PADCHECK.seen,
+}) };
+
+function frame() {
+  pad.update();
+  if (pad.connected) {
+    globalThis.PADCHECK.seen = true;
+    globalThis.PADCHECK.id = pad.id;
+    statusEl.className = 'ok';
+    statusEl.innerHTML = `Connected: <b>${pad.id}</b><br>mapping: ${pad.mapping || 'non-standard'} · rumble: ${
+      (navigator.getGamepads()[pad.index]?.vibrationActuator) ? 'available' : 'not available'}`;
+  } else if (globalThis.PADCHECK.seen) {
+    statusEl.className = 'bad';
+    statusEl.textContent = 'Controller disconnected.';
+  }
+
+  rows.forEach(([, get, bi], i) => {
+    const v = get();
+    const fill = bars[i];
+    if (bi) {
+      const half = Math.abs(v) * 50;
+      fill.style.left = v < 0 ? (50 - half) + '%' : '50%';
+      fill.style.width = half + '%';
+    } else {
+      fill.style.left = '0';
+      fill.style.width = (v * 100) + '%';
+    }
+  });
+
+  btns.forEach((d, i) => d.classList.toggle('on', pad.held(i)));
+  requestAnimationFrame(frame);
+}
+frame();
+</script>
+</body>
+</html>

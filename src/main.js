@@ -21,6 +21,7 @@ import { ShipCamera } from './game/camera.js';
 import { Controls } from './game/controls.js';
 import { Input } from './core/input.js';
 import { Pointer } from './core/pointer.js';
+import { Gamepad } from './core/gamepad.js';
 
 const canvas = document.getElementById('gl');
 const diagEl = document.getElementById('diag');
@@ -64,7 +65,8 @@ const clouds = new CloudSystem({ renderer, seed: 'veilwake', quality: 'high' });
 const input = new Input(canvas);
 const pointer = new Pointer(canvas);
 const ship = new Flight({ rng });
-const controls = new Controls(input, pointer);
+const pad = new Gamepad();
+const controls = new Controls(input, pointer, pad);
 const shipCam = new ShipCamera(camera);
 
 // Start inside the cloud layer rather than above it. Where the camera sits is
@@ -117,6 +119,7 @@ scene.add(markers);
 const state = { heading: 0 };
 
 function update(dt) {
+  pad.update();
   controls.update(dt).applyTo(ship);
 
   // The medium pushes back. Turbulence is an acceleration on the body, not
@@ -137,6 +140,7 @@ function update(dt) {
   }
 
   ship.step(dt);
+  controls.updateRumble(ship, { electrical: 0, damage: 0 });
   shipCam.update(ship, dt, loop.simTime);
 
   markers.rotation.y = (state.heading += dt * 0.06) * 0.15;
@@ -199,7 +203,7 @@ loop.render = (alpha, frameMs) => {
 
 globalThis.GAME = {
   THREE, renderer, scene, camera, loop, rng, BUDGET, clouds,
-  ship, controls, shipCam, input, pointer,
+  ship, controls, shipCam, input, pointer, pad,
   stats: () => loop.perf.stats(),
   violations: () => loop.perf.violations(),
 

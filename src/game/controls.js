@@ -12,6 +12,7 @@
 // the feel of the ship as anything in flight.js.
 
 import { clamp, clamp01, approach } from '../core/math.js';
+import { PAD } from '../core/gamepad.js';
 
 export const BINDINGS = {
   pitchUp:    ['KeyS', 'ArrowDown'],
@@ -38,9 +39,13 @@ export class Controls {
    * @param {import('../core/input.js').Input} input
    * @param {import('../core/pointer.js').Pointer} pointer
    */
-  constructor(input, pointer = null) {
+  constructor(input, pointer = null, pad = null) {
     this.input = input;
     this.pointer = pointer;
+    this.pad = pad;
+
+    /** Which device last moved. Drives which prompts the interface shows. */
+    this.lastDevice = 'keyboard';
 
     /** Smoothed axes, so digital keys do not produce square-wave commands. */
     this.pitch = 0;
@@ -87,7 +92,7 @@ export class Controls {
     // model's coupling signs are all consistent with each other and re-deriving
     // three of them to fix one key binding is how that consistency gets broken.
     let wantYaw = (this._held('yawLeft') ? 1 : 0) - (this._held('yawRight') ? 1 : 0);
-    const wantRoll = (this._held('rollRight') ? 1 : 0) - (this._held('rollLeft') ? 1 : 0);
+    let wantRoll = (this._held('rollRight') ? 1 : 0) - (this._held('rollLeft') ? 1 : 0);
 
     // Mouse steers as a displacement from centre rather than as a rate, so the
     // stick returns when the hand does. A rate-based mouse in a ship with
@@ -98,6 +103,48 @@ export class Controls {
       if (Math.abs(mx) > 0.02) wantYaw = clamp(wantYaw - mx, -1, 1);
       if (Math.abs(my) > 0.02) wantPitch = clamp(wantPitch + my, -1, 1);
     }
+
+    // --- gamepad ----------------------------------------------------------
+    //
+    // Sticks are applied *after* the key shaping and are not passed through it.
+    // A stick is already a continuous displacement, correct on arrival; running
+    // it through a smoother built for square-wave keys only adds latency, and
+    // that is the usual reason pad support ends up feeling worse than the
+    // keyboard it was meant to improve.
+    let padActive = false;
+    if (this.pad && this.pad.connected) {
+      const a = this.pad.axes, tr = this.pad.triggers;
+
+      // Left stick flies: horizontal is yaw, vertical is pitch. The flight
+      // model turns left on positive yaw, so the stick is negated here for the
+      // same reason the D key is.
+      if (Math.abs(a.lx) > 0.001 || Math.abs(a.ly) > 0.001) {
+        wantYaw = clamp(wantYaw - a.lx, -1, 1);
+        wantPitch = clamp(wantPitch - a.ly, -1, 1);
+        padActive = true;
+      }
+      // Right stick rolls. Deliberately not a second flight axis: the right
+      // stick is where a player expects to look, and giving it authority over
+      // attitude as well makes the ship feel like it is fighting them.
+      if (Math.abs(a.rx) > 0.001) {
+        wantRoll = clamp(wantRoll + a.rx, -1, 1);
+        padActive = true;
+      }
+
+      // Right trigger is throttle as an absolute position, not an increment.
+      // This is the single biggest gain from a pad in this game: the whole
+      // signature system asks the player to choose a power setting and hold it,
+      // and an analog trigger makes that one gesture instead of a negotiation
+      // with two keys.
+      if (tr.right > 0.001) { this.throttle = tr.right; padActive = true; }
+      if (tr.left > 0.001) padActive = true;
+
+      if (this.pad.wasPressed(PAD.LS)) this.cutEngines = !this.cutEngines;
+      if (this.pad.wasPressed(PAD.Y)) { this.lightsOn = !this.lightsOn; this.lightsToggled = true; }
+      if (this.pad.wasPressed(PAD.X)) this.scanRequested = true;
+      if (this.pad.buttons.size) padActive = true;
+    }
+    if (padActive) this.lastDevice = 'gamepad';
 
     this.pitch = this._shape(this.pitch, wantPitch, dt);
     this.yaw = this._shape(this.yaw, wantYaw, dt);
@@ -128,11 +175,35 @@ export class Controls {
     ship.input.yaw = this.yaw;
     ship.input.roll = this.roll;
     ship.input.throttle = this.cutEngines ? 0 : this.throttle;
-    ship.input.boost = !this.cutEngines && this._held('boost');
-    ship.input.brake = this._held('brake');
+    const padBoost = this.pad && this.pad.connected &&
+      (this.pad.held(PAD.A) || this.pad.triggers.left > 0.6);
+    const padBrake = this.pad && this.pad.connected && this.pad.held(PAD.B);
+    ship.input.boost = !this.cutEngines && (this._held('boost') || padBoost);
+    ship.input.brake = this._held('brake') || padBrake;
     ship.input.lateral = (this._held('strafeR') ? 1 : 0) - (this._held('strafeL') ? 1 : 0);
     ship.input.vertical = (this._held('liftUp') ? 1 : 0) - (this._held('liftDown') ? 1 : 0);
     return ship;
+  }
+
+  /**
+   * Drive the pad's motors from hull state.
+   *
+   * A continuous level rather than a series of events, because what it is
+   * reporting is continuous: how hard the machine is working and how much the
+   * medium is shaking it. The low motor carries engine and turbulence, the high
+   * one carries electrical activity and damage — the same split the audio uses,
+   * so the two channels agree about what is happening.
+   *
+   * This is also a gameplay readout: engine vibration is a signature the player
+   * is trying to manage, and feeling it in the hands is the most direct possible
+   * feedback that they are being loud.
+   */
+  updateRumble(ship, extra = {}) {
+    if (!this.pad || !this.pad.connected) return;
+    const t = ship.telemetry();
+    const low = clamp01(t.throttle * 0.34 + t.boost * 0.40 + t.turbulence * 0.30);
+    const high = clamp01((extra.electrical || 0) * 0.5 + (extra.damage || 0) * 0.35 + t.gLoad / 90 * 0.2);
+    this.pad.setRumble(low, high);
   }
 
   /** Consume the edge-triggered flags. */
