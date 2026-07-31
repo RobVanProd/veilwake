@@ -11,6 +11,8 @@
 //   clouds.transmittance(a, b)         line-of-sight through the field, [0,1]
 //   clouds.concealmentAt(x, y, z)      how hidden something at that point is
 //   clouds.storms                      live electrical cells, world space
+//   clouds.lights                      LightRegistry: lamps, plumes, biolum
+//   clouds.shaft                       god-ray tuning, live
 //   clouds.setQuality(name)            'low' | 'medium' | 'high' | 'ultra'
 //   clouds.coverageAt(x, z)            weather-map coverage for a column
 //   clouds.verifyAgreement(renderer)   proves the CPU query matches the shader
@@ -41,6 +43,7 @@
 import * as THREE from 'three';
 import { makeShapeVolume, makeDetailVolume, makeWeatherMap, makeBlueNoiseTile, sample2D, sample3D } from './noise.js';
 import { FULLSCREEN_VERT, MARCH_FRAG, COMPOSITE_FRAG, PROBE_FRAG } from './shaders/cloud.glsl.js';
+import { LightRegistry, MAX_MARCH_LIGHTS, lightningCell } from './lights.js';
 import { clamp01, lerp, smoothstep } from '../core/math.js';
 import { seedFrom } from '../core/rng.js';
 
@@ -90,12 +93,24 @@ const WIND = {
  * rebuild that changing preset costs. `scale` is the fraction of the drawing
  * buffer the march runs at — the composite handles any ratio, but 0.5 is the one
  * the depth reconstruction is happiest with.
+ *
+ * The shaft group is what god rays cost. `shaftSteps` is the shadow march the
+ * mist between the clouds takes toward the sun, `shaftStride` is how often along
+ * the view ray it takes one — base metres, then metres of stride gained per
+ * metre of distance — and `shaftReach` is that march's own schedule, a first
+ * step and a growth factor. `shaftRange` is where shafts stop being marched and
+ * become a constant, which is a saving of about a quarter of their cost for a
+ * difference visible nowhere.
  */
 export const CLOUD_QUALITY = {
-  low:    { scale: 0.42, steps: 120, lightSteps: 3, msOctaves: 2, maxDist: 15000, minStep: 26, growth: 0.055, maxStep: 240, coarseMin: 110, coarseMax: 260, tauCap: 0.45, softK: 0.0044, detailFade: [200, 800] },
-  medium: { scale: 0.50, steps: 176, lightSteps: 5, msOctaves: 3, maxDist: 19000, minStep: 19, growth: 0.040, maxStep: 175, coarseMin: 80,  coarseMax: 220, tauCap: 0.34, softK: 0.0036, detailFade: [350, 1300] },
-  high:   { scale: 0.50, steps: 256, lightSteps: 7, msOctaves: 3, maxDist: 24000, minStep: 13, growth: 0.030, maxStep: 130, coarseMin: 55,  coarseMax: 175, tauCap: 0.24, softK: 0.0030, detailFade: [500, 2000] },
-  ultra:  { scale: 0.66, steps: 384, lightSteps: 8, msOctaves: 3, maxDist: 30000, minStep: 9,  growth: 0.022, maxStep: 95,  coarseMin: 36,  coarseMax: 130, tauCap: 0.20, softK: 0.0024, detailFade: [800, 3200] },
+  low:    { scale: 0.42, steps: 120, lightSteps: 3,  msOctaves: 2, maxDist: 15000, minStep: 26, growth: 0.055, maxStep: 240, coarseMin: 110, coarseMax: 260, tauCap: 0.45, softK: 0.0044, detailFade: [200, 800],
+            shaftSteps: 5, shadowTaps: 2, shaftStride: [200, 0.080], shaftReach: [120, 2.35], shaftRange: [900, 2200] },
+  medium: { scale: 0.50, steps: 176, lightSteps: 5,  msOctaves: 3, maxDist: 19000, minStep: 19, growth: 0.040, maxStep: 175, coarseMin: 80,  coarseMax: 220, tauCap: 0.34, softK: 0.0036, detailFade: [350, 1300],
+            shaftSteps: 7, shadowTaps: 3, shaftStride: [120, 0.060], shaftReach: [72,  1.95], shaftRange: [1200, 3000] },
+  high:   { scale: 0.50, steps: 256, lightSteps: 9,  msOctaves: 3, maxDist: 24000, minStep: 13, growth: 0.030, maxStep: 130, coarseMin: 55,  coarseMax: 175, tauCap: 0.24, softK: 0.0030, detailFade: [500, 2000],
+            shaftSteps: 9, shadowTaps: 3, shaftStride: [68,  0.045], shaftReach: [45,  1.72], shaftRange: [1600, 4000] },
+  ultra:  { scale: 0.66, steps: 384, lightSteps: 11, msOctaves: 3, maxDist: 30000, minStep: 9,  growth: 0.022, maxStep: 95,  coarseMin: 36,  coarseMax: 130, tauCap: 0.20, softK: 0.0024, detailFade: [800, 3200],
+            shaftSteps: 11, shadowTaps: 4, shaftStride: [52, 0.035], shaftReach: [40,  1.58], shaftRange: [2000, 5000] },
 };
 
 /**
@@ -207,9 +222,45 @@ export class CloudSystem {
       densityScale: this.densityScale,
     };
 
+    /**
+     * God-ray tuning, in one block, because these are art-direction numbers and
+     * finding them took a capture each.
+     *
+     * `mist` at 1.0 is not a free choice. The march used to blend each cloud
+     * sample toward uHazeColor by distance; the mist integral replaces that with
+     * the same quantity integrated along the ray, and at a gain of 1.0 the two
+     * agree to within the difference between a sum and its integral. Moving it
+     * off 1.0 does not brighten the shafts, it re-fogs the whole sky.
+     *
+     * `sun` is the one that decides whether a beam reads. It is the radiance the
+     * mist scatters out of direct sunlight, and since the shadow term multiplies
+     * it, it is also exactly the contrast between a lit lane and a shadowed one.
+     *
+     * `local` is the same for lamps and creature light, and it is larger because
+     * the mist is thin: see vw_mist in the shader for why that number is not 1.
+     *
+     * `farShadow` is what the sun term is multiplied by past shaftRange, where
+     * the shadow stops being marched. Low on purpose — a high value floods the
+     * distance with unshadowed light and flattens every shaft in front of it.
+     */
+    this.shaft = { mist: 1.0, sun: 0.22, phaseG: 0.58, local: 70.0, farShadow: 0.30 };
+
+    /** Local light sources the march samples. Bounded, chosen per frame; see
+     *  lights.js. The ship, the creatures and this class's own storms all
+     *  register here, so there is exactly one path from "something is glowing"
+     *  to "the volume around it is lit". */
+    this.lights = new LightRegistry();
+
     this.storms = [];
     for (let i = 0; i < 4; i++) {
       this.storms.push({ x: 0, y: 0, z: 0, radius: 1400, intensity: 0, r: 0, g: 0, b: 0, charge: 0 });
+      // A storm is a light like any other. It used to be four hard-coded slots
+      // in the march with an exponential falloff standing in for a second light
+      // march; routed through the registry it gets the same occlusion and the
+      // same shafts as a lamp, which is what a discharge inside a cloud body
+      // should look like — the cloud lit from within, with the shape of the
+      // cloud in it.
+      this.storms[i].light = this.lights.add(lightningCell({ key: `storm/${i}`, on: false }));
     }
 
     // GPU timing instrumentation, off until benchPass turns it on.
@@ -320,8 +371,23 @@ export class CloudSystem {
       uAerialK: { value: 9.0e-5 },
       uLightStep: { value: 42 },
       uLightFar: { value: 2400 },
-      uStormPos: { value: [new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4()] },
-      uStormCol: { value: [new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4()] },
+      // Growth per step, and how fast the shadow cone widens with distance. The
+      // second used to be a literal 0.35, which is a six-hundred-metre blur at
+      // the far end of the march — wider than most of the gaps a shaft comes
+      // through, and the single largest reason this pass read as a wash.
+      uLightShape: { value: new THREE.Vector2(1.48, 0.16) },
+      uShaft: { value: new THREE.Vector4() },
+      uShaftStep: { value: new THREE.Vector4() },
+      uShaftRange: { value: new THREE.Vector3() },
+      uLightCount: { value: 0 },
+      uLightPos: { value: vec4Array(MAX_MARCH_LIGHTS) },
+      uLightCol: { value: vec4Array(MAX_MARCH_LIGHTS) },
+      uLightDir: { value: vec4Array(MAX_MARCH_LIGHTS) },
+      uLightPar: { value: vec4Array(MAX_MARCH_LIGHTS) },
+      // A light contributing less than this to a sample does not get an
+      // occlusion march. Set against the scale of the palette, where a lit cloud
+      // face is around 1.0, so this is roughly "two per cent of nothing".
+      uLightCutoff: { value: 0.02 },
       uBlueNoise: { value: this.blueTex },
     };
 
@@ -382,6 +448,9 @@ export class CloudSystem {
         MARCH_STEPS: q.steps,
         LIGHT_STEPS: q.lightSteps,
         MS_OCTAVES: q.msOctaves,
+        SHAFT_STEPS: q.shaftSteps,
+        LIGHT_SHADOW_TAPS: q.shadowTaps,
+        MAX_LIGHTS: MAX_MARCH_LIGHTS,
       },
       depthTest: false, depthWrite: false, toneMapped: false,
     });
@@ -392,8 +461,20 @@ export class CloudSystem {
     this.marchUniforms.uTauCap.value = q.tauCap;
     this.marchUniforms.uCoarseMax.value = q.coarseMax;
     this.marchUniforms.uDetailFade.value.set(q.detailFade[0], q.detailFade[1]);
+    this.marchUniforms.uShaftStep.value.set(q.shaftReach[0], q.shaftReach[1], q.shaftStride[0], q.shaftStride[1]);
+    this._writeShaftUniforms();
     this._targetsDirty = true;
     return this;
+  }
+
+  /** The art-direction half of the god rays, pushed to the shader. Separate from
+   *  setQuality because these are tuned live and must not cost a shader
+   *  rebuild — a recompile between two captures makes them incomparable. */
+  _writeShaftUniforms() {
+    const s = this.shaft;
+    const q = this.preset;
+    this.marchUniforms.uShaft.value.set(s.mist, s.sun, s.phaseG, s.local);
+    this.marchUniforms.uShaftRange.value.set(q.shaftRange[0], q.shaftRange[1], s.farShadow);
   }
 
   _ensureTargets(renderer) {
@@ -552,7 +633,11 @@ export class CloudSystem {
     for (let i = 0; i < 4; i++) {
       const s = this.storms[i];
       const c = found[i];
-      if (!c) { s.intensity = 0; s.charge = 0; continue; }
+      if (!c) {
+        s.intensity = 0; s.charge = 0;
+        this.lights.set(s.light, { on: false });
+        continue;
+      }
 
       s.x = c.x;
       s.z = c.z;
@@ -580,6 +665,24 @@ export class CloudSystem {
       s.r = lerp(P.stormEmber[0], P.stormFlash[0], mixF);
       s.g = lerp(P.stormEmber[1], P.stormFlash[1], mixF);
       s.b = lerp(P.stormEmber[2], P.stormFlash[2], mixF);
+
+      // STORM_LIGHT_GAIN converts the old falloff's peak to the new one's.
+      // The march used to add intensity * exp(-r/radius) straight into the cloud
+      // radiance with no phase function; it now goes through the same
+      // inverse-square, cone and phase path as every other light, and a
+      // side-on phase value of about 0.57 is what has to be divided out for a
+      // stroke to be as bright as it was before it started casting shafts.
+      this.lights.set(s.light, {
+        on: s.intensity > 0.001,
+        position: [s.x, s.y, s.z],
+        color: [s.r, s.g, s.b],
+        intensity: s.intensity * STORM_LIGHT_GAIN,
+        radius: s.radius,
+        shadowRange: s.radius * 1.6,
+        // A stroke has to win a slot against the ship's lamps for the frame it
+        // lasts, and an ember must not.
+        priority: 1 + stroke * 9,
+      });
     }
   }
 
@@ -682,11 +785,12 @@ export class CloudSystem {
     u.uJitter.value = (frameIndex * 0.6180339887) % 1;
     this.compositeUniforms.uDitherPhase.value = (frameIndex * 0.7548776662) % 1;
 
-    for (let i = 0; i < 4; i++) {
-      const s = this.storms[i];
-      u.uStormPos.value[i].set(s.x - this.origin.x, s.y, s.z - this.origin.z, 1 / Math.max(s.radius, 1));
-      u.uStormCol.value[i].set(s.r, s.g, s.b, s.intensity);
-    }
+    this._writeShaftUniforms();
+    // Chosen here rather than in update(), because which lights are worth
+    // marching depends on where the camera ended up, and update() runs at the
+    // fixed step while this runs per drawn frame.
+    this.lights.prepare(this._v3, u.uCamFwd.value);
+    this.lights.writeUniforms(u, this.origin);
   }
 
   // -------------------------------------------------------------------------
@@ -1125,6 +1229,19 @@ const CONCEAL_OFFSETS = (() => {
     k, k, -k, -k, k, -k, k, -k, -k, -k, -k, -k,
   ]);
 })();
+
+/** See where it is used: the factor that keeps a lightning stroke as bright as
+ *  it was before it was routed through the light registry and picked up a phase
+ *  function. */
+const STORM_LIGHT_GAIN = 0.55;
+
+/** Three.js wants a uniform array to arrive already the size the shader
+ *  declares; a shorter one silently uploads garbage into the tail. */
+function vec4Array(n) {
+  const a = new Array(n);
+  for (let i = 0; i < n; i++) a[i] = new THREE.Vector4();
+  return a;
+}
 
 /** Deterministic float in [0,1) from two coordinates. Storm anchors only. */
 function hashf(a, b, seed) {
