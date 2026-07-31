@@ -45,16 +45,42 @@
 > for not equalling the prose figure "3.2"; and `visibility_m` returns 14.8
 > against a printed "15", inside that integer's own rounding.
 >
-> ## What is genuinely not built
+> ## The vertical slice — built, and honestly short
 >
-> The **vertical slice**: opening, discovery, quiet sequence, two scripted
-> encounters, concealment, escape, failure/restart, ending. The systems exist and
-> are verified. The *sequences* do not. This is still systems, not a game.
+> Nine beats in `src/game/director.js`, advancing on measurements of the real
+> simulation rather than on timers. Three playstyles verified end to end:
 >
-> Also unbuilt: the other three creature archetypes (Lantern, Wake Hunter,
-> Choir), and discrete visible sun shafts — the ship's lamp casts a real beam,
-> but the sun's mist in-scatter is a graded glow rather than something a player
-> would call a ray. See the commit "Decouple the shaft shadow" for the numbers.
+> | playstyle | outcome | length |
+> |---|---|---|
+> | competent — runs the moment it commits | ESCAPED | 3.8 min |
+> | stealthy — never detected once | ESCAPED | 5.2 min |
+> | reckless — committed to at 360 m, did not run | **TAKEN** | 2.4 min |
+>
+> **It is 2.5–5 minutes, not the 10–15 the mandate asks for.** Those are scripted
+> bot runs with no exploration and no mistakes, so a human will take longer — but
+> not three times longer. Padding the beats would be worse than a short slice
+> that holds together, so the honest number is the one above.
+>
+> Three things measurement forced, all of which were designed wrong first:
+>
+> - **Failure cannot mean being caught.** The Listener does 20 m/s committed; the
+>   ship does 100 at cruise, 60 at six percent throttle, and 13 drifting on the
+>   wind with engines cut. A creature closing on a stationary ship got from 600 m
+>   to 529 m and then lost ground for two minutes. Being taken is failing to
+>   break its commitment — 600 m held for six seconds.
+> - **Encounters must be placed against how loud the player will be.** Detection
+>   range goes as `10^(-dB/20)`, so the contract's 3.2 km is for full cruise; at
+>   0.7 throttle the ship is inaudible past ~660 m.
+> - **Every beat needs a second exit.** A quarter-throttle player emits ~10 dB and
+>   is genuinely never heard. The first version stranded exactly the player who
+>   had understood the game.
+>
+> ## What is still not built
+>
+> The other three creature archetypes (Lantern, Wake Hunter, Choir), and discrete
+> visible sun shafts — the ship's lamp casts a real beam, but the sun's mist
+> in-scatter is a graded glow rather than something a player would call a ray.
+> See the commit "Decouple the shaft shadow" for the numbers.
 >
 > ---
 
