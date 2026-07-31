@@ -546,18 +546,49 @@ export class SignatureRecorder {
    * once per creature per sense tick and allocating there would put six objects
    * a second per creature into the nursery.
    */
+  /**
+   * What the ship was emitting `ageSec` ago, interpolated between samples.
+   *
+   * This used to be `Math.round(ageSec * hz)`, which snapped the read to the
+   * nearest stored sample. At 2 Hz that is a half-second staircase, and it lands
+   * directly on the one property §5.2 asks this system to have: a creature is
+   * supposed to be reacting to something you did nine seconds ago, and a
+   * quantised read makes the delay wrong by up to a quarter of a second in
+   * either direction — measured, a burst 3006 m away arrived 0.6 s early, which
+   * is two hundred metres of sound travel that never happened.
+   *
+   * Interpolating costs one extra read and removes the quantisation entirely,
+   * which matters beyond this test: acoustic detection ranges are fitted against
+   * exact transmission values, and feeding them a staircased source undoes some
+   * of that precision for no reason.
+   *
+   * Position is interpolated too. It has to be — a source point that snaps
+   * between half-second-apart ship positions at 100 m/s jumps fifty metres, and
+   * the bearing a creature derives from it jumps with it.
+   */
   at(ageSec) {
-    const back = Math.round(ageSec * this.hz);
-    if (back >= this.count || back < 0) return null;
-    const idx = (this.head - 1 - back + this.capacity * 2) % this.capacity;
-    const base = idx * REC_STRIDE;
+    const exact = ageSec * this.hz;
+    const back = Math.floor(exact);
+    const frac = exact - back;
+    if (back < 0 || back >= this.count) return null;
+
+    const idxA = (this.head - 1 - back + this.capacity * 2) % this.capacity;
+    // The older neighbour. If there is none, fall back to no interpolation
+    // rather than reading past the end of the history.
+    const hasB = (back + 1) < this.count;
+    const idxB = hasB ? (this.head - 2 - back + this.capacity * 2) % this.capacity : idxA;
+    const t = hasB ? frac : 0;
+
+    const a = idxA * REC_STRIDE, b = idxB * REC_STRIDE;
     const out = this._out;
-    out.simTime = this.times[idx];
-    for (let i = 0; i < CHANNELS.length; i++) out[CHANNELS[i]] = this.data[base + i];
+    out.simTime = this.times[idxA] + (this.times[idxB] - this.times[idxA]) * t;
+    for (let i = 0; i < CHANNELS.length; i++) {
+      out[CHANNELS[i]] = this.data[a + i] + (this.data[b + i] - this.data[a + i]) * t;
+    }
     const n = CHANNELS.length;
-    out.x = this.data[base + n];
-    out.y = this.data[base + n + 1];
-    out.z = this.data[base + n + 2];
+    out.x = this.data[a + n] + (this.data[b + n] - this.data[a + n]) * t;
+    out.y = this.data[a + n + 1] + (this.data[b + n + 1] - this.data[a + n + 1]) * t;
+    out.z = this.data[a + n + 2] + (this.data[b + n + 2] - this.data[a + n + 2]) * t;
     return out;
   }
 

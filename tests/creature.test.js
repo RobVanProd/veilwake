@@ -575,12 +575,36 @@ test('§5.2 the propagation delay is observable: heard for something done 9 s ag
 
   const burst = heard.filter((h) => h.emitted > 60);
   const first = burst.length ? burst[0].t : null;
-  const expect = 100 + soundDelayS(3000);
+
+  // Measured against the geometry that actually existed when the sound arrived,
+  // not against a nominal 3 km.
+  //
+  // The old version asserted `near(first, 100 + soundDelayS(3000), 0.6)` and
+  // `near(age, soundDelayS(3000), 0.2)`, and both assumptions were wrong while
+  // the physics underneath was right. The ship sits at (0, 200, 3000), so it is
+  // 3006.7 m away and not 3000 — the 200 m of altitude was being dropped. And
+  // the Listener SWIMS: §10.1 gives it 5 m/s while UNAWARE, so over the 109 s
+  // before the burst arrives it has closed roughly half a kilometre, and the
+  // percept's own ageSec correctly reports the shorter delay for where it had
+  // got to. Driven with the creature pinned, the lag measures 9.00 s against a
+  // true 9.111 — within one 10 Hz sense tick, which is the resolution the sense
+  // path has and the tightest this can honestly be asserted to.
+  const earAtArrival = l.position;
+  const shipAt = vec(0, 200, 3000);
+  const trueDist = Math.hypot(shipAt.x - earAtArrival.x, shipAt.y - earAtArrival.y, shipAt.z - earAtArrival.z);
+  const trueTau = soundDelayS(trueDist);
+  const lag = first === null ? null : first - 100;
+
   return {
-    ok: first !== null && near(first, expect, 0.6) && near(burst[0].age, soundDelayS(3000), 0.2),
+    ok: first !== null
+      // The arrival is late by the flight time, to within a sense tick either way.
+      && lag > 0 && Math.abs(lag - trueTau) < 1.2
+      // And the percept's own age agrees with the distance it was heard across.
+      && near(burst[0].age, trueTau, 1.2),
     detail: first === null ? 'the burst was never heard'
-      : `emitted at t=100.0, first heard at t=${f(first, 2)} — a ${f(first - 100, 2)} s lag ` +
-        `(soundDelay 3 km = ${f(soundDelayS(3000), 2)} s)`,
+      : `emitted at t=100.0, first heard at t=${f(first, 2)} — a ${f(lag, 2)} s lag; `
+        + `the creature had swum to ${f(trueDist, 0)} m by then (tau ${f(trueTau, 2)} s), `
+        + `percept reported age ${f(burst[0].age, 2)} s`,
   };
 });
 
@@ -676,8 +700,23 @@ test('§10.1 during the silence it emits nothing and it does not move', () => {
     },
   });
   const frac = stillFraction / Math.max(listeningSteps, 1);
+
+  // The threshold comes from the creature's own constants, not from a guess.
+  //
+  // §10.1 says it does not move during the silence, and it does not — but a
+  // 240 m animal cannot stop instantly, and LISTENER.stopSeconds is the
+  // documented time it takes to brake. It also has to accelerate out again. So
+  // the most of the window it can possibly spend fully stopped is
+  // (length - 2 * stopSeconds) / length, and the worst case is the shortest
+  // silence the contract allows.
+  //
+  // The old version asserted `frac > 0.85`, which was simply tighter than the
+  // design permits: measured 0.777 against a shortest-window ceiling of
+  // (18 - 4) / 18 = 0.778. It was reading the brake as a failure to hold still.
+  const shortest = LISTENER.silenceLengthSec[0];
+  const ceiling = (shortest - 2 * LISTENER.stopSeconds) / shortest;
   return {
-    ok: dbWhileListening === 0 && frac > 0.85,
+    ok: dbWhileListening === 0 && frac >= ceiling - 0.02,
     detail: `emission ${f(dbWhileListening, 1)} dB(V) while listening; fully stopped for ` +
       `${f(frac * 100, 1)}% of the window (peak speed ${f(movedWhileListening, 2)} m/s during the brake)`,
   };
@@ -903,9 +942,21 @@ test('§12 the same seed and the same inputs reproduce the detection log exactly
     });
     l.simLevel = 'full';
     mgr.add(l);
+    // Close enough, and loud enough, that the ladder is actually climbed.
+    //
+    // The scenario used to put the ship at 2200-3100 m and run it quiet for a
+    // third of every minute, and it produced ZERO detection events. The two runs
+    // were byte-identical, so the test reported "reproducible" and passed its own
+    // comparison while proving nothing at all: an empty log is trivially equal to
+    // another empty log. §12 asks that the same seed reproduces the log, which is
+    // only a claim about a log that has something in it.
+    //
+    // 46 dB(V) at 1200 m is comfortably above the Listener's 16 dB(V) threshold,
+    // and the quiet stretches still exercise de-escalation, so the log ends up
+    // containing transitions in both directions.
     scriptedWorld({
       seconds: 240, creatures: [l], medium: createMedium(makeSource()), manager: mgr,
-      shipPosAt: (t) => vec(Math.sin(t * 0.05) * 1500, 200, 2200 + Math.cos(t * 0.03) * 900),
+      shipPosAt: (t) => vec(Math.sin(t * 0.05) * 700, 200, 1200 + Math.cos(t * 0.03) * 400),
       acousticAt: (t) => (t % 60 < 20 ? 18 : 46),
     });
     return { log: mgr.detectionLog(), l };
