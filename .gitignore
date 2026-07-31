@@ -1,8 +1,13 @@
 # Captures are regenerated on demand by the game itself. Only the deliberate
 # reference images in evidence/baseline/ are committed.
-evidence/*.png
-evidence/*.json
+#
+# Everything, not just *.png: GAME.capture({name}) writes to evidence/<name>
+# verbatim and callers rarely type the extension, so the old *.png rule matched
+# almost nothing and left 700+ extensionless PNGs sitting in `git status`. A
+# status listing nobody can read is a status nobody reads.
+evidence/*
 !evidence/baseline/
+!evidence/.gitkeep
 
 # Fetched on demand from the official Cloudflare release; 54MB.
 tools/cloudflared.exe

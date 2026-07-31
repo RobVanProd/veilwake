@@ -189,9 +189,16 @@ export class Listener extends Creature {
       lifeSec: LISTENER.corridorLifeSec,
     });
     /**
-     * Carving is off until the renderer can show a corridor. §2.2 forbids an
-     * approximation that favours the creature, and a duct the player cannot see
-     * is exactly that. Turn it on in the same change that carves the picture.
+     * Off by default so a contract test can pin one behaviour at a time — a
+     * Listener under study should not be reshaping the medium it is being
+     * measured in. The game turns it on; see main.js and `director.spawn`.
+     *
+     * That default was also, for a long time, a bug: the renderer could not draw
+     * a corridor, nothing set the flag, and so the field was built, aged,
+     * refilled and queried by the creature's own senses while staying
+     * permanently empty. The failure was silent in both directions — no test
+     * went red, and the TRACE beat narrated a corridor over untouched cloud.
+     * tests/corridor.test.js now asserts the whole chain end to end.
      */
     this.carving = opts.carving ?? false;
 

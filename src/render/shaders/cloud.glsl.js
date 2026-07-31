@@ -48,6 +48,14 @@ uniform vec2  uCoverage;     // gain, bias
 uniform vec2  uErosion;      // detail strength, unused second slot
 uniform float uDensityScale;
 
+// Corridors: xyz is a segment centre in cloud space, w is how much of the carve
+// survives at this segment's age. Bounded because vw_carve runs at every density
+// sample and its cost is linear in the count; the CPU sends the nearest ones.
+#define MAX_CORRIDORS 16
+uniform vec4  uCorridor[MAX_CORRIDORS];
+uniform int   uCorridorCount;
+uniform float uCorridorRadius;
+
 const float VW_TAU = 6.28318530718;
 
 float vw_remap(float v, float lo, float hi) {
@@ -108,6 +116,46 @@ bool vw_possible(vec3 p, float soft) {
 // makes a single sample representative of the volume it stands for, which is
 // what a properly prefiltered field would give and is roughly a hundred times
 // cheaper. Gameplay queries always pass 0, so the CPU field is the sharp one.
+/**
+ * The corridors an enormous thing has pushed through the field.
+ *
+ * §10.1: the Listener is 240 m long and "carves a corridor of cleared,
+ * low-density air" 300 m across that persists for several minutes. The
+ * simulation has modelled this from the beginning — the creature's own senses
+ * travel further down its corridors, because §2.3's duct test is satisfied by
+ * cleared air — but the renderer never carved, so the single best piece of
+ * evidence in the game that something enormous went past was invisible. The
+ * TRACE beat literally says SOMETHING CAME THROUGH HERE over undisturbed cloud.
+ *
+ * The maths is corridor.js's clearance(), moved into the march. Only the
+ * radial term is computed here: fill, which is how much of the carve survives
+ * as the corridor ages and refills, depends on nothing spatial and is folded
+ * into w on the CPU. So a segment costs one distance test and a smoothstep.
+ *
+ * Segments combine by max, never by sum -- two overlapping passes make one
+ * corridor, not a hole. A corridor is a place vapour was pushed out of, and
+ * pushing twice cannot remove more than all of it.
+ *
+ * The set is bounded and chosen per frame by distance to the camera, because
+ * this runs at every density sample in the march and the cost is linear in it.
+ */
+float vw_carve(vec3 p) {
+  if (uCorridorCount == 0) return 1.0;
+  float worst = 0.0;
+  for (int i = 0; i < MAX_CORRIDORS; i++) {
+    if (i >= uCorridorCount) break;
+    vec4 c = uCorridor[i];
+    vec3 dv = p - c.xyz;
+    float d2 = dot(dv, dv);
+    if (d2 >= uCorridorRadius * uCorridorRadius) continue;
+    // Soft-edged, and it has to be: a hard wall would make the acoustic
+    // spreading exponent snap between 20 and 12 as a creature crossed it.
+    float radial = 1.0 - smoothstep(0.55, 1.0, sqrt(d2) / uCorridorRadius);
+    worst = max(worst, c.w * radial);
+  }
+  return 1.0 - worst;
+}
+
 float vw_density(vec3 p, float detailLod, float soft, out float h, out vec4 w) {
   h = vw_heightFraction(p);
   w = vw_weather(p);
@@ -154,7 +202,7 @@ float vw_density(vec3 p, float detailLod, float soft, out float h, out vec4 w) {
     d = vw_remap(d, e * max(k, 0.0), 1.0);
   }
 
-  return d * uDensityScale;
+  return d * uDensityScale * vw_carve(p);
 }
 `;
 

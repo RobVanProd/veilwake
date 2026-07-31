@@ -350,7 +350,9 @@ export class Director {
     const seed = (this.rng ? Math.floor(this.rng() * 1e9) : 1) | 0;
     const Ctor = { Listener, Lantern, WakeHunter, Choir }[kind];
     if (!Ctor) return null;
-    const c = new Ctor({ position: at, seed, ...opts });
+    // Carving is opt-in on the creature so contract tests can pin one behaviour
+    // at a time; in a real world an enormous animal always leaves a corridor.
+    const c = new Ctor({ position: at, seed, carving: true, ...opts });
     this.creatures.add(c);
     this._spawned.push(c);
     return c;

@@ -854,7 +854,15 @@ test('§10.1 the corridor is the place a call carries — measured in dB at 6 km
   };
 });
 
-test('§2.2 carving is off by default, so the creature cannot use a corridor the player cannot see', () => {
+// The default is false so a creature under test does not reshape the medium it
+// is being measured in — every assertion above this one about ducts, spreading
+// and transmission would otherwise be measuring a world the Listener had already
+// dug through. It is not, any more, about the player being unable to see the
+// corridor: the renderer carves now, and tests/corridor.test.js proves the
+// picture and `clearance()` are the same number. What this pins is that the
+// opt-in stays explicit, and that opting in actually produces segments — the
+// original bug was a default nothing overrode, so both halves matter.
+test('carving is off by default and on when asked, so a test creature never digs its own world', () => {
   const l = makeListener({ seed: 'carveoff' });
   l.simLevel = 'full';
   const clear = createFlatMedium({ density: 0 });

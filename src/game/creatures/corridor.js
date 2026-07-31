@@ -15,14 +15,22 @@
 // builds itself out of the same three lines that build the picture. Nothing here
 // authors a duct and nothing here mentions the player.
 //
-// Note what this file does *not* do: it does not change what the cloud shader
-// draws. The creature and its senses agree about the corridor; the renderer does
-// not know about it yet. That is a visible-world integration listed in the
-// module's API notes, not a silent approximation — §2.2's rule is that an
-// approximation must be conservative in the player's favour, and a corridor the
-// player cannot see but which the creature treats as clear air is the opposite.
-// Until the renderer carves too, run with `visible: false` (the default) and the
-// Listener carves nothing at all.
+// The renderer carves too. `CloudSystem._packCorridors` takes the nearest live
+// segments from every field each frame, folds `fill` into the weight and hands
+// them to the march as `uCorridor`; `vw_carve` in the shader and `_carve` on the
+// CPU are the same function written twice, and `verifyAgreement()` holds them
+// together. That symmetry is not decoration. §2.2 requires an approximation to
+// be conservative in the player's favour, and a corridor the player cannot see
+// but which the creature treats as clear air is the exact opposite — the game
+// would be routing sound down a tunnel that, as far as the player can tell, is
+// not there. So `clearance()` here and the picture on screen are two readings of
+// one number, and the assertions in tests/corridor.test.js exist to keep them
+// that way.
+//
+// Sixteen is the renderer's segment budget, against a field capacity of 96. A
+// long corridor therefore draws only its nearest stretch. The creature's senses
+// still see all 96 — which errs the safe way, since the animal's model of the
+// medium is never *more* generous than what the player is shown.
 
 import { clamp01 } from '../../core/math.js';
 

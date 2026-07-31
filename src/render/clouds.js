@@ -369,6 +369,16 @@ export class CloudSystem {
      */
     this.sky = new Luminaries({ seed: s });
 
+    /**
+     * CorridorFields to carve out of the field. The game pushes the creatures'
+     * own fields here; nothing is copied, so a corridor ages and refills in the
+     * picture exactly as it does in the creature's senses.
+     */
+    this.corridors = [];
+    this._corridorData = null;
+    this._corridorCount = 0;
+    this._corridorRadius = 150;
+
     this.storms = [];
     for (let i = 0; i < 4; i++) {
       this.storms.push({ x: 0, y: 0, z: 0, radius: 1400, intensity: 0, r: 0, g: 0, b: 0, charge: 0 });
@@ -458,6 +468,9 @@ export class CloudSystem {
       uCoverage: { value: new THREE.Vector2() },
       uErosion: { value: new THREE.Vector2() },
       uDensityScale: { value: 1 },
+      uCorridor: { value: Array.from({ length: 16 }, () => new THREE.Vector4()) },
+      uCorridorCount: { value: 0 },
+      uCorridorRadius: { value: 150 },
     };
 
     this.marchUniforms = {
@@ -699,6 +712,9 @@ export class CloudSystem {
     if (camera) {
       camera.getWorldPosition(this._camPos);
       this._recentre(this._camPos);
+      // After recentring, so the segments are packed against the origin the
+      // march will actually use this frame.
+      this._packCorridors(this._camPos.x, this._camPos.y, this._camPos.z);
     }
 
     // Wrap each advection to its own period. The field is periodic, so a wrapped
@@ -994,7 +1010,104 @@ export class CloudSystem {
       const k = f.erosion * detailLod * (1 - smoothstep(0.30, 0.85, d)) * (1 - soft * 1.5);
       d = remapG(d, e * Math.max(k, 0), 1.0);
     }
-    return d * f.densityScale;
+    return d * f.densityScale * this._carve(px, py, pz);
+  }
+
+  /**
+   * The CPU half of the corridor carve. Must stay diffable against `vw_carve`.
+   *
+   * It reads the same packed segment array the shader gets, rather than calling
+   * CorridorField.clearance() directly, precisely so the two cannot drift: if
+   * the GPU is carving from sixteen segments and the CPU from ninety-six, then
+   * navigation, concealment and every creature sense disagree with the picture,
+   * and verifyAgreement() would report it as a rendering bug when it is a
+   * bookkeeping one.
+   */
+  _carve(px, py, pz) {
+    const n = this._corridorCount;
+    if (n === 0) return 1;
+    const a = this._corridorData;
+    const r = this._corridorRadius, r2 = r * r;
+    let worst = 0;
+    for (let i = 0; i < n; i++) {
+      const b = i * 4;
+      const dx = px - a[b], dy = py - a[b + 1], dz = pz - a[b + 2];
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 >= r2) continue;
+      const radial = 1 - smoothstep(0.55, 1.0, Math.sqrt(d2) / r);
+      const v = a[b + 3] * radial;
+      if (v > worst) worst = v;
+    }
+    return 1 - worst;
+  }
+
+  /**
+   * Take the nearest corridor segments from every field and pack them.
+   *
+   * Called once a frame from update(). Bounded at MAX_CORRIDORS because the
+   * carve runs at every density sample in the march — a segment costs one
+   * distance test there, and the cost is linear in the count.
+   *
+   * Nearest-to-camera rather than newest: what matters is what the player can
+   * see, and the oldest segment of a corridor you are flying along is far more
+   * relevant than the newest one of a corridor ten kilometres away.
+   */
+  _packCorridors(camX, camY, camZ) {
+    const MAX = 16;
+    if (!this._corridorData) {
+      this._corridorData = new Float32Array(MAX * 4);
+      this._corridorScratch = [];
+    }
+    const pick = this._corridorScratch;
+    pick.length = 0;
+    this._corridorRadius = 150;
+
+    for (const field of this.corridors) {
+      if (!field || !field.count) continue;
+      this._corridorRadius = field.radiusM;
+      const cap = field.capacity;
+      for (let i = 0; i < field.count; i++) {
+        const j = (field.head - 1 - i + cap * 2) % cap;
+        const age = (field.now - field.born[j]) / field.lifeSec;
+        if (age >= 1) continue;
+        // `fill` is how much of the carve survives at this age. It has no
+        // spatial term, so folding it in here keeps the shader to one distance
+        // test and a smoothstep per segment.
+        const fill = 1 - smoothstep(field.refillFrom, 1, age);
+        const w = field.strength * fill;
+        if (w <= 0.002) continue;
+        const dx = field.x[j] - camX, dy = field.y[j] - camY, dz = field.z[j] - camZ;
+        pick.push({ d2: dx * dx + dy * dy + dz * dz, x: field.x[j], y: field.y[j], z: field.z[j], w });
+      }
+    }
+
+    pick.sort((a, b) => a.d2 - b.d2);
+    const n = Math.min(pick.length, MAX);
+    for (let i = 0; i < n; i++) {
+      const s = pick[i], b = i * 4;
+      // Cloud space: the field stores world points and the march works in the
+      // recentred frame, so the origin comes off here exactly as it does for
+      // the camera.
+      this._corridorData[b] = s.x - this.origin.x;
+      this._corridorData[b + 1] = s.y - this.origin.y;
+      this._corridorData[b + 2] = s.z - this.origin.z;
+      this._corridorData[b + 3] = s.w;
+    }
+    this._corridorCount = n;
+
+    const u = this.marchUniforms;
+    if (u.uCorridor) {
+      for (let i = 0; i < MAX; i++) {
+        const b = i * 4;
+        u.uCorridor.value[i].set(
+          this._corridorData[b], this._corridorData[b + 1],
+          this._corridorData[b + 2], this._corridorData[b + 3],
+        );
+      }
+      u.uCorridorCount.value = n;
+      u.uCorridorRadius.value = this._corridorRadius;
+    }
+    return n;
   }
 
   /**

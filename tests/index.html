@@ -119,6 +119,9 @@ try {
   const mood = await import(`./mood.test.js?v=${v}`);
   render('art direction', mood.run(GAME), 'dark, cold, and blazing where it should be');
 
+  const corridor = await import(`./corridor.test.js?v=${v}`);
+  render('corridor carving', corridor.run(GAME), 'the tube the Listener leaves behind');
+
   // Last, because it plays three whole games and leaves the sim wherever the
   // final run ended. Anything after it would be measuring a used world.
   const slice = await import(`./slice.test.js?v=${v}`);

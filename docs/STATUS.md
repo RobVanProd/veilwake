@@ -10,7 +10,7 @@ however good it is. That distinction has already cost this project real time
 twice — the cockpit and all four creature bodies were each reported finished
 while being unreachable from the running game.
 
-Last updated: after audio, menus and the cockpit upgrade landed.
+Last updated: after corridor carving landed and the NOT-reachable list emptied.
 
 ---
 
@@ -36,7 +36,8 @@ Last updated: after audio, menus and the cockpit upgrade landed.
 | **HUD** | ✅ | Control legend that fades, and swaps for the active device. |
 | **Signature instruments** | ✅ | Six live columns in the centre of the console, reading the real channels. |
 | **All four creatures in the slice** | ✅ | Lantern at TRACE, Listener through the middle, a Wake Hunter pack at HUNTED, a Choir on the way out. |
-| **Test suite** | ✅ | 164 passing across 8 suites, including the art direction and the whole vertical slice as regressions. |
+| **Corridor carving** | ✅ | The Listener's 300 m corridor is cut out of the volume the player is looking at. On the axis 92% of the density is gone, softening to nothing by the wall; segments refill over 240 s. The shader's `vw_carve` and the CPU's `_carve` read the same packed segments, so `clearance()` and the picture are one number — CPU/GPU agreement holds at 0.0012 with corridors live. |
+| **Test suite** | ✅ | 170 passing across 9 suites, including the art direction, corridor carving and the whole vertical slice as regressions. |
 
 ---
 
@@ -44,9 +45,20 @@ Last updated: after audio, menus and the cockpit upgrade landed.
 
 Everything here exists in the repo and is unreachable from the running game.
 
-| Thing | State | What is missing |
-|---|---|---|
-| **Corridor carving** | ⚠️ | `corridor.js` models the Listener's 300 m cleared corridor and the creature uses it, but the renderer does not carve, so it is invisible. |
+*Empty.* Corridor carving was the last entry and shipped; see the note below for
+why it sat here so long.
+
+> **Worth remembering.** Corridor carving was complete on the simulation side for
+> weeks — the field aged, refilled and served `clearance()`, the Listener carried
+> one, and §2.3's duct test already routed sound down it. What was missing was two
+> things at once: the renderer never carved, and `carving` defaults to `false` so
+> that a creature under test does not reshape the medium it is measured in.
+> Nothing in the game overrode that default. So the field stayed permanently
+> empty, no test went red, and the TRACE beat said SOMETHING CAME THROUGH HERE
+> over undisturbed cloud. The lesson for this table: "module exists and is
+> imported" was not a strong enough test of *built*. `tests/corridor.test.js` now
+> asserts the whole chain — field carves → renderer is told → density drops →
+> CPU and GPU still agree.
 
 ---
 

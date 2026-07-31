@@ -181,6 +181,12 @@ const creatureSignature = createSignatureView(signature, { positions: { at: ship
 creatures.add(new Listener({
   position: { x: 900, y: 760, z: -5200 },
   seed: seedFrom('listener/first'),
+  // §10.1: it carves because it is enormous. The flag defaults to false so that
+  // contract tests can pin a creature and study one behaviour at a time, which
+  // meant that in the actual game nothing ever carved anything — the corridor
+  // field was built, aged, refilled and queried by the creature's own senses,
+  // and stayed permanently empty.
+  carving: true,
 }));
 
 // shipPos is filled in per frame rather than captured here: `ship` is declared
@@ -407,6 +413,16 @@ function update(dt) {
   creatureCtx.tick = loop.tick;
   creatureCtx.shipPos = ship.position;
   creatures.update(dt, loop.tick, creatureCtx);
+
+  // Hand the renderer every corridor being carved, so the cleared air a 240 m
+  // animal pushed through the field is actually visible. The fields are passed
+  // by reference, not copied, so a corridor ages and refills on screen exactly
+  // as it does in the creature's own senses — §2.3's duct test and the picture
+  // are the same object.
+  clouds.corridors.length = 0;
+  for (const c of creatures.creatures) {
+    if (c.corridor && c.corridor.count && !c.dormant) clouds.corridors.push(c.corridor);
+  }
   // Bodies follow the simulation, and the scene's lights follow the sky, so a
   // creature is lit by whatever luminary is actually up this frame.
   syncSceneLights();
