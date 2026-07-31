@@ -67,6 +67,17 @@ export class Controls {
     this.releaseRate = 11.0;
     this.mouseSensitivity = 1.0;
     this.useMouse = true;
+
+    /**
+     * The keyboard and the pad genuinely disagree about pitch: W is forward and
+     * pitches *down* like a flight stick, while pushing the pad stick forward
+     * pitches *up*. That is not an oversight — the two were flown separately and
+     * each was called correct on its own device, which is the usual outcome
+     * because a stick sits under the thumb and a key sits under the finger.
+     * Left as-is, with a switch for anyone whose hands say otherwise.
+     */
+    this.invertPadPitch = false;
+    this.padSensitivity = 1.0;
   }
 
   _held(action) {
@@ -92,7 +103,11 @@ export class Controls {
     // model's coupling signs are all consistent with each other and re-deriving
     // three of them to fix one key binding is how that consistency gets broken.
     let wantYaw = (this._held('yawLeft') ? 1 : 0) - (this._held('yawRight') ? 1 : 0);
-    let wantRoll = (this._held('rollRight') ? 1 : 0) - (this._held('rollLeft') ? 1 : 0);
+    // Roll shares yaw's convention: a positive command rolls *left*. Measured by
+    // driving roll = +1 and reading the right wing's height, not assumed — the
+    // model's internal signs are self-consistent, and both flips belong here at
+    // the boundary rather than inside it.
+    let wantRoll = (this._held('rollLeft') ? 1 : 0) - (this._held('rollRight') ? 1 : 0);
 
     // Mouse steers as a displacement from centre rather than as a rate, so the
     // stick returns when the hand does. A rate-based mouse in a ship with
@@ -119,15 +134,16 @@ export class Controls {
       // model turns left on positive yaw, so the stick is negated here for the
       // same reason the D key is.
       if (Math.abs(a.lx) > 0.001 || Math.abs(a.ly) > 0.001) {
-        wantYaw = clamp(wantYaw - a.lx, -1, 1);
-        wantPitch = clamp(wantPitch - a.ly, -1, 1);
+        const s = this.padSensitivity;
+        wantYaw = clamp(wantYaw - a.lx * s, -1, 1);
+        wantPitch = clamp(wantPitch - a.ly * s * (this.invertPadPitch ? -1 : 1), -1, 1);
         padActive = true;
       }
       // Right stick rolls. Deliberately not a second flight axis: the right
       // stick is where a player expects to look, and giving it authority over
       // attitude as well makes the ship feel like it is fighting them.
       if (Math.abs(a.rx) > 0.001) {
-        wantRoll = clamp(wantRoll + a.rx, -1, 1);
+        wantRoll = clamp(wantRoll - a.rx * this.padSensitivity, -1, 1);
         padActive = true;
       }
 

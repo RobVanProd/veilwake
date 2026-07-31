@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VEILWAKE — tests</title>
+
+<!-- Same vendored Three.js the game uses, resolved from here rather than the
+     project root. The tests must exercise the shipped module, not a copy. -->
+<script type="importmap">
+{ "imports": { "three": "../vendor/three.module.js" } }
+</script>
+
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 28px; background: #05070b; color: #b9c7da;
+    font: 13px/1.7 ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+  }
+  h1 { font-size: 15px; letter-spacing: .26em; color: #e6f0fb; margin: 0 0 2px; font-weight: 500; }
+  .sub { color: #6f8299; margin-bottom: 20px; }
+  #summary { font-size: 14px; margin-bottom: 16px; }
+  .ok { color: #8fe3a8; } .bad { color: #ff8b8b; } .dim { color: #55677e; }
+  table { border-collapse: collapse; max-width: 760px; width: 100%; }
+  td { padding: 3px 10px 3px 0; vertical-align: top; border-bottom: 1px solid #121b26; }
+  td.v { width: 52px; }
+  td.n { color: #cfe2f5; }
+  td.d { color: #55677e; text-align: right; white-space: nowrap; }
+</style>
+</head>
+<body>
+<h1>VEILWAKE</h1>
+<div class="sub">control polarity — every input measured against real ship motion</div>
+<div id="summary" class="dim">running…</div>
+<table id="rows"></table>
+
+<script type="module">
+// Cache-busted so a run always reflects what is on disk. Without this the
+// browser happily serves the module graph from before the last edit, which
+// once made a fixed bug look unfixed.
+const v = Date.now();
+const T = await import(`./controls.test.js?v=${v}&bust=${v}`);
+
+const r = T.run();
+const sum = document.getElementById('summary');
+sum.className = r.fail.length ? 'bad' : 'ok';
+sum.textContent = r.fail.length
+  ? `${r.fail.length} FAILED — ${r.pass}/${r.results.length} passed`
+  : `all ${r.pass} passed`;
+
+const rows = document.getElementById('rows');
+for (const x of r.results) {
+  const tr = document.createElement('tr');
+  const n = (q) => (typeof q === 'number' ? q.toFixed(3) : q);
+  tr.innerHTML =
+    `<td class="v ${x.ok ? 'ok' : 'bad'}">${x.ok ? 'pass' : 'FAIL'}</td>` +
+    `<td class="n">${x.name}</td>` +
+    `<td class="${x.ok ? 'dim' : 'bad'}">${x.ok ? x.got : `wanted ${x.want}, got ${x.got}`}</td>` +
+    `<td class="d">turn ${n(x.detail.sideways)} · nose ${n(x.detail.vertical)} · wing ${n(x.detail.wing)}</td>`;
+  rows.appendChild(tr);
+}
+
+globalThis.TESTS = r;
+</script>
+</body>
+</html>
