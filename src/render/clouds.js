@@ -327,7 +327,12 @@ export class CloudSystem {
     // cloud body's uSigmaT. See the note at the shadow term in cloud.glsl.js:
     // the body wants to be opaque and the shaft wants to be graded, and sharing
     // one coefficient means raising the first silently deletes the second.
-    this.shaft = { mist: 1.0, sun: 1.6, phaseG: 0.58, local: 45.0, farShadow: 0.30, sigma: 0.045 };
+    // `sun` is the gain on direct sunlight scattered by the mist between clouds,
+    // and it is far more sensitive than it looks. Swept at the gameplay camera
+    // with the sim time pinned: 0.22 passes the whole mood suite, 0.5 puts 47%
+    // of the frame above the blazing threshold, 1.6 puts 99.9% there. Past about
+    // 0.3 it stops being light in the air and becomes a dust storm.
+    this.shaft = { mist: 1.0, sun: 0.22, phaseG: 0.58, local: 45.0, farShadow: 0.30, sigma: 0.045 };
 
     /** Local light sources the march samples. Bounded, chosen per frame; see
      *  lights.js. The ship, the creatures and this class's own storms all

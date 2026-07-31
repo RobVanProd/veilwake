@@ -158,6 +158,22 @@ export class ShipCamera {
     // --- position --------------------------------------------------------
     const offset = this._tmp.copy(this.lean).add(this.threatOffset).applyQuaternion(ship.orientation);
     this._target.add(offset);
+
+    // Carry the camera along with the ship BEFORE correcting toward the target.
+    //
+    // Without this feed-forward a first-order lag has a steady-state error
+    // proportional to speed — the camera settles v/positionLag behind the eye
+    // and stays there for as long as the ship holds velocity. At 100 m/s with
+    // lag 26 that is 3.85 m predicted, 3.45 m measured, and the eye sits 1.9 m
+    // inside the hull: the camera was permanently outside its own cockpit, which
+    // is exactly how this was found. It had been true since this file was
+    // written and was invisible while there was no near geometry to reference.
+    //
+    // With the feed-forward, constant-velocity flight produces no error at all
+    // and the lag only expresses itself under acceleration — which is the thing
+    // it was always for. A camera that trails at cruise reads as a loose mount;
+    // one that trails only when you pull is what reads as mass.
+    this.position.addScaledVector(ship.velocity, dt);
     this.position.lerp(this._target, 1 - Math.exp(-c.positionLag * dt));
 
     // --- orientation -----------------------------------------------------

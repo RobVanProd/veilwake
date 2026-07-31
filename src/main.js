@@ -15,8 +15,9 @@ import * as THREE from 'three';
 import { Loop } from './core/loop.js';
 import { Rng, seedFrom } from './core/rng.js';
 import { BUDGET } from './core/perf.js';
-import { CloudSystem } from './render/clouds.js';
+import { CloudSystem, CLOUD_PALETTE } from './render/clouds.js';
 import { shipLamp, thrusterPlume } from './render/lights.js';
+import { Cockpit } from './game/cockpit.js';
 import { Flight } from './game/flight.js';
 import { ShipCamera } from './game/camera.js';
 import { Controls } from './game/controls.js';
@@ -78,6 +79,18 @@ const clouds = new CloudSystem({ renderer, seed: 'veilwake', quality: 'high' });
 const lampL = clouds.lights.add(shipLamp({ key: 'ship/lamp/port' }));
 const lampR = clouds.lights.add(shipLamp({ key: 'ship/lamp/stbd' }));
 const plume = clouds.lights.add(thrusterPlume({ key: 'ship/thruster' }));
+
+// The cockpit. Real geometry welded to the ship, drawn into the same linear HDR
+// buffer and tone mapped with everything else, so it cannot drift out of the
+// palette the way an overlay eventually does.
+//
+// It matters more here than it would in a brighter game: darkness on its own
+// does not read as dread, it reads as empty, because nothing in frame is dark in
+// relation to anything. This is the only near field the game has, and the only
+// thing on screen that says continuously how small the machine is.
+const cockpit = new Cockpit({ clouds });
+cockpit.syncPalette(CLOUD_PALETTE);
+scene.add(cockpit.object3D);
 
 const input = new Input(canvas);
 const pointer = new Pointer(canvas);
@@ -176,6 +189,9 @@ function update(dt) {
   ship.step(dt);
   controls.updateRumble(ship, { electrical: 0, damage: 0 });
   shipCam.update(ship, dt, loop.simTime);
+  // After the camera, so the interior is lit for the eye position actually used
+  // this frame rather than the previous one.
+  cockpit.update(dt, ship, camera, controls.lightsOn);
 
   markers.rotation.y = (state.heading += dt * 0.06) * 0.15;
 
@@ -260,6 +276,7 @@ globalThis.GAME = {
   ship, controls, shipCam, input, pointer, pad,
   /** The light registry, so a capture can inspect what was actually lit. */
   lights: clouds.lights,
+  cockpit,
   stats: () => loop.perf.stats(),
   violations: () => loop.perf.violations(),
 
@@ -335,6 +352,11 @@ globalThis.GAME = {
 
   ready: true,
 };
+
+// Compile the cockpit's shaders before the clock starts. A first-frame compile
+// is a hitch the perf budget would report as a real one, and it would land on
+// the opening shot.
+cockpit.warmup(renderer, scene, camera);
 
 loop.start();
 bootEl.classList.add('gone');
