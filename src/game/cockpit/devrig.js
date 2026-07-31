@@ -25,6 +25,35 @@
 // cockpit viewed from outside the hull, which reads as a broken cockpit rather
 // than as a broken rig. `snapCamera` below sidesteps it; the bug is in
 // camera.js and is not this folder's to fix.
+//
+// --- and a second one, which invalidated every capture taken through this rig -
+//
+// `pose()` used to pin the ship at a fixed position while giving it a nonzero
+// velocity, and then settle the camera against that. Those two states cannot
+// both be true, and ShipCamera's feed-forward term is where they collide:
+//
+//     this.position.addScaledVector(ship.velocity, dt);   // camera.js:176
+//     this.position.lerp(this._target, 1 - Math.exp(-positionLag * dt));
+//
+// The feed-forward exists so that constant-velocity flight has no steady-state
+// lag, and it is correct — for a ship that is actually moving. Against a ship
+// held still it is a constant push toward the nose that the lerp then has to
+// fight, and the fixed point is not the eye:
+//
+//     error = v * dt * (1 - k) / k,   k = 1 - exp(-positionLag * dt)
+//
+// At the default spd of 90 m/s that is 0.75 * 0.8051 / 0.1949 = **3.10 m**, and
+// measured it was 3.1001 m. The eye sits 1.9 m inside the hull and the canopy
+// mouth is 1.2 m ahead of it, so the camera settled 1.74 m *in front of the
+// ship*, outside the cockpit, looking back at nothing. Every capture this rig
+// has ever produced was taken from out there.
+//
+// The fix is not to zero the velocity — lean, FOV and shake all read it, so a
+// stationary ship poses a different cockpit. `pose()` now flies the ship in at
+// constant velocity and arrives at the requested point, which is a state the
+// feed-forward is correct for. `camLocal` in the returned info is the assertion:
+// it must read [0, 0.55, 1.9], and if it does not, nothing the capture shows
+// about the cockpit means anything.
 
 import * as THREE from 'three';
 import { Cockpit } from '../cockpit.js';
@@ -38,7 +67,7 @@ export async function attach(G = globalThis.GAME) {
   if (!G || !G.ready) throw new Error('GAME is not up');
   if (G._cockpitRig) G._cockpitRig.detach();
 
-  const cockpit = new Cockpit({ clouds: G.clouds });
+  const cockpit = new Cockpit({ clouds: G.clouds, signature: G.signature });
   cockpit.syncPalette(CLOUD_PALETTE);
   G.scene.add(cockpit.object3D);
   cockpit.warmup(G.renderer, G.scene, G.camera);
@@ -52,21 +81,40 @@ export async function attach(G = globalThis.GAME) {
   const eul = new THREE.Euler();
   const invQ = new THREE.Quaternion();
   const fwd = new THREE.Vector3();
+  const start = new THREE.Vector3();
+  const camLocal = new THREE.Vector3();
 
-  /** Freeze the ship in an exact attitude and let the camera settle onto it. */
+  /**
+   * Fly the ship in to an exact attitude and position, and settle the camera.
+   *
+   * Not "freeze": see the second note at the top of this file. The ship is
+   * advanced along its own forward vector at `spd` for the whole settle and
+   * arrives at (x, y, z) on the last step, which is a state ShipCamera's
+   * velocity feed-forward is correct for. Holding it still instead puts the
+   * camera 3.1 m outside the hull.
+   */
   function pose(o = {}) {
     const {
       yaw = 0, pitch = 0, roll = 0, spd = 90, thr = 0.55, boost = 0,
-      lights = false, x = 0, y = 140, z = 0, t = 30, turb = 0,
-      energy = 74, stalled = false, steps = 90,
+      lights = false, x = 0, y = 700, z = 0, t = 30, turb = 0,
+      energy = 74, stalled = false, steps = 140,
     } = o;
 
     G.loop.stop();
     G.seek(t);
 
     const s = G.ship;
-    const hold = () => {
-      s.position.set(x, y, z);
+    const dt = 1 / 120;
+
+    // Attitude first, because the run-in direction is the ship's own forward.
+    s.orientation.setFromEuler(eul.set(pitch, yaw, roll, 'YXZ'));
+    s.angularVelocity.set(0, 0, 0);
+    s._axes();
+    // Start far enough back that `steps` of flight lands exactly on the target.
+    start.set(x, y, z).addScaledVector(s.forward, -spd * dt * steps);
+
+    const hold = (i) => {
+      s.position.copy(start).addScaledVector(s.forward, spd * dt * i);
       s.orientation.setFromEuler(eul.set(pitch, yaw, roll, 'YXZ'));
       s.angularVelocity.set(0, 0, 0);
       s._axes();
@@ -78,31 +126,40 @@ export async function attach(G = globalThis.GAME) {
       s.stalled = stalled;
     };
 
-    hold();
+    hold(0);
     G.controls.lightsOn = lights;
-    // See the note at the top of this file.
+    // See the first note at the top of this file.
     G.shipCam._initialised = false;
-    // The medium is probed at 10 Hz and smoothed on arrival; a teleport is not a
-    // flight, so let it converge rather than capturing it mid-ramp.
+    // The medium is probed at 10 Hz and smoothed on arrival; let it converge
+    // rather than capturing it mid-ramp.
     cockpit._probe = 0;
 
-    for (let i = 0; i < steps; i++) {
-      hold();
-      G.shipCam.update(s, 1 / 120, G.loop.simTime + i * 0.0083);
-      cockpit.update(1 / 120, s, G.camera, lights);
+    for (let i = 0; i <= steps; i++) {
+      hold(i);
+      G.shipCam.update(s, dt, G.loop.simTime + i * dt);
+      cockpit.update(dt, s, G.camera, lights);
       cockpit._probe = 0;
     }
-    G.clouds.update(1 / 120, G.camera);
+    G.clouds.update(dt, G.camera);
+    // The camera is not in the scene graph, so scene.updateMatrixWorld() does
+    // not touch it. Anything that raycasts against this pose reads a stale
+    // matrix unless this is here — that mistake cost four wrong leak reports.
+    G.camera.updateMatrixWorld(true);
 
     invQ.copy(s.orientation).invert();
     fwd.set(0, 0, -1).applyQuaternion(G.camera.quaternion).applyQuaternion(invQ);
+    camLocal.copy(G.camera.position).sub(s.position).applyQuaternion(invQ);
 
     return {
       sunVis: +cockpit.sunVis.toFixed(3),
+      lightVis: Array.from(cockpit.lightVis).map((v) => +v.toFixed(3)),
       density: +cockpit.density.toFixed(3),
       /** Must be very close to [0,0,-1]. If it is not, the rig is wrong and
        *  nothing the capture shows about the cockpit means anything. */
       camFwdInShip: fwd.toArray().map((v) => +v.toFixed(3)),
+      /** Must be very close to EYE, [0, 0.55, 1.9]. Same warning, and this is
+       *  the one that was silently wrong for the whole life of this file. */
+      camLocal: camLocal.toArray().map((v) => +v.toFixed(3)),
       fov: +G.camera.fov.toFixed(1),
       gauges: Array.from(cockpit.gauges).map((v) => +v.toFixed(2)),
     };

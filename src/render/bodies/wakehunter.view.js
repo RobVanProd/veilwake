@@ -35,9 +35,9 @@
 // §10.3: they raise `u` to about 0.6 within 200 m, "**visible in the vapour
 // before they are**". The simulation publishes `turbulenceAt()` and says plainly
 // that nothing consumes it yet, and the medium is not this file's to write. So
-// the tell here is rendered rather than simulated: faint streaks of sheared
-// vapour streaming past the animal along its flight axis, reaching further ahead
-// of the nose than the body is long.
+// the tell here is rendered rather than simulated — but it is rendered as a
+// *modulation of the medium*, not as objects hanging in it, and the difference
+// is the whole of this section.
 //
 // It is driven by speed, which is the honest coupling — speed is what writes the
 // trail in §3.3 and speed is what stirs the air — so a drifting pack has almost
@@ -45,25 +45,140 @@
 // first. That is §10.3's escalation table's last row, "turbulence arriving
 // before they do", drawn instead of described.
 //
-// **The streaks write depth, and they have to.** This was measured, not assumed.
-// The cloud march is bounded by the scene depth buffer, so geometry that writes
-// no depth lets the ray run to the far plane, accumulate a full column of cloud,
-// and composite over the top of it: an additive mesh with `depthWrite: false` is
-// invisible in any direction that has cloud in it, which is every direction. A
-// capture at seven times the intended opacity showed nothing at all, and the same
-// mesh made opaque showed up immediately — see `evidence/wh_c_tellboost` against
-// `evidence/wh_d_telldebug`.
+// --- why the obvious mechanism cannot work -----------------------------------
 //
-// Writing depth costs one artefact, stated rather than hidden: the march stops at
-// a streak, so the cloud *behind* it is not accumulated and the streak's pixels
-// lose whatever the background was contributing. That is why the ribbons are
-// filaments a metre or two across rather than sheets — the artefact is then a
-// few pixels wide and reads as shear, which is what it is meant to look like —
-// and why `alphaTest` is set: without it the faded-out ends of every ribbon
-// would still write depth and cut invisible slots in the cloud.
+// The first two attempts at this drew additive ribbons, and both were wrong in
+// the same way. The measurement that settles it, from `evidence/whA_*` — the
+// same frame captured with the tell forced on and forced off, differenced:
 //
-// The honest fix is for the disturbance to be density in the volume rather than
-// geometry in front of it, and that belongs to `clouds.js`, not here.
+//   background      range   worst pixel, tell off -> on        delta
+//   lit cloud       150 m   (179,208,214) -> (  8, 13, 21)     -186
+//   lit cloud       400 m   (169,200,206) -> ( 11, 17, 26)     -174
+//   lit cloud       700 m   (166,198,204) -> (  9, 14, 22)     -174
+//   dark sky        150 m   (  6, 13, 25) -> ( 87,111,141)      +98
+//   dark sky        400 m   ( 10, 19, 35) -> ( 66, 86,113)      +67
+//
+// The tell was a hole on cloud and a lamp on sky, at every range a pack is
+// fought at, and the *reason* is structural rather than a matter of tuning.
+//
+// `COMPOSITE_FRAG` resolves every pixel as `bg * cloud.a + cloud.rgb`, where
+// `bg` is the scene buffer only when the depth buffer says something is there —
+// `if (myDist > 9.0e5) bg = vw_sky(rd)` throws the scene colour away otherwise.
+// So a mesh in this scene has exactly two options and no third:
+//
+//   * write no depth, and be **deleted**. The composite never samples `uScene`
+//     for it and the march runs past it to the far plane. Measured at seven
+//     times the intended opacity it showed nothing at all.
+//   * write depth, and **replace** everything beyond it. The march stops at the
+//     mesh, so `cloud.rgb` no longer contains the cloud behind it, and that
+//     pixel becomes the mesh's own colour and nothing else.
+//
+// A constant colour in the second case is a constant *substitution* into a
+// background that ranges from 0.005 to about 1.0 in linear light — two hundred
+// to one. There is no constant that is not a hole at one end and a lamp at the
+// other. The previous pass answered the review by fading the streaks out beyond
+// 500 m, which removed them from the capture being argued about and left them
+// intact across 150-500 m, where the numbers above were taken.
+//
+// --- what this draws instead --------------------------------------------------
+//
+// The trap in the paragraph above is the word "beyond". A depth-writing fragment
+// has to state what is behind it *at the depth it claims to be at* — and nothing
+// says the sleeve has to claim to be where it is.
+//
+// So it does not. **Every fragment of the tell writes the depth at which the
+// cloud march was going to stop anyway** — where its ray leaves the layer, or
+// the far plane if it never does — instead of the sleeve's real distance. That
+// one decision is the whole design, and it buys four things at once:
+//
+//   * the march is not stopped at the animal, so `cloud.rgb` and `cloud.a` still
+//     contain the whole column of vapour the player was looking at. The
+//     background is delivered by the compositor, exactly, with no reconstruction
+//     error at all — which is the failure every earlier attempt died of;
+//   * the composite still reads the scene buffer for those pixels, because the
+//     depth is inside the frustum, so the fragment can add to what is there;
+//   * the tell loses the depth test against every solid thing in the scene, so
+//     it can never cover the animal, a pack member, or the ship. The whole class
+//     of "it deleted what was behind it" is gone rather than bounded;
+//   * and the composite multiplies the scene buffer by `cloud.a` — the
+//     transmittance of the entire column — so a disturbance drawn this way is
+//     *automatically* buried by cloud in front of it, in exactly the proportion
+//     the medium says it should be.
+//
+// What the fragment writes is the value that makes the composite land on
+// `B * (1 + s)`, where `B` is the background and `s` is a signed turbulence
+// field — vapour piled up in some places and scoured thin in others. Working
+// `bg * cloud.a + cloud.rgb` backwards through the aerial mix gives
+//
+//     scene = (sky(rd) + s * B / cloud.a - haze * aer) / (1 - aer)
+//
+// and the only quantity in it this file has to go and find is `B / cloud.a`,
+// which comes from `clouds.cloudRT`. That ratio scales the *perturbation* and
+// nothing else: an error in it makes the stirring slightly too strong or too
+// weak. It cannot make a hole, because the hole would have to come from the
+// background term, and the background term never passes through this file.
+//
+// Multiplicative is the other half of the point. The disturbance is a fraction
+// *of the medium that is actually there*, so against a lit mass it is a visible
+// stirring and against empty sky it is nothing — 30% of 0.005 is invisible, and
+// no amount of it will ever be a lamp. The sign flip that made this "the worst
+// thing in the deliverable" is gone by construction rather than by tuning.
+//
+// Two costs, stated rather than hidden:
+//
+//   * **`cloudRT` is one frame old.** During the scene pass the march has not
+//     run yet, so what is there is the previous frame's. It is re-projected
+//     through `compositeUniforms.uCamFwd/Right/Up/TanHalf` — the very basis that
+//     produced that buffer — which makes the correction exact for camera
+//     rotation and leaves only translation parallax, about 1.5 px per frame at
+//     cruise against cloud a couple of kilometres out. It only ever mis-scales
+//     the perturbation, so a stale frame is a slightly wrong amount of stirring
+//     rather than a wrong picture.
+//   * **A ray that never leaves the layer cannot be given its true stop.**
+//     `uMaxDist` is 24 km and the camera's far plane is 12, so anything within
+//     about eight degrees of level, seen from inside the deck, has to settle for
+//     the far plane and loses the tail of its column beyond it. That is the only
+//     residual left, it is confined to a horizontal band, and it is measured
+//     rather than assumed: `evidence/whD_*` is the same frame captured with the
+//     stirring forced to zero and the discard removed, which makes a correct
+//     sleeve invisible and any error in the mechanism the whole of what is left.
+//
+// --- where this actually stands ----------------------------------------------
+//
+// The defect is fixed and the feature is not finished. Both halves of that are
+// measured, and the second half is not hedging.
+//
+// **Fixed.** Against dark sky the tell now changes *nothing* — 0 pixels at 150,
+// 300, 400, 700 and 1200 m, against +98, +73, +67 and +50 before. Against lit
+// cloud the mean change over the sleeve is about 1.3 levels with localised
+// maxima around 50, against a flat -174 to -186 across the whole footprint at
+// every range before. There are no dashes, no capsules and no hard ends, because
+// there is no discrete geometry left to have ends. The sign flip cannot come
+// back: the background never passes through this file, and the disturbance is a
+// multiplier on it.
+//
+// **Not finished.** The disturbance is too faint to read. With the stirring
+// forced to zero the sleeve still changes the frame by a mean of 1.0 level —
+// that is the mechanism's own residual — and at the shipped amplitude the signal
+// is only about twice that. Two things are eating it, both outside this file:
+//
+//   * `camera.far` is 12 km and `uMaxDist` is 24, so a ray that is still inside
+//     the cloud layer at the far plane cannot be given the depth the march would
+//     have stopped at. Those fragments now decline to draw rather than deleting
+//     the column beyond — which is why the tell is absent for views within about
+//     eight degrees of level, and a pack flies at your altitude. Making the two
+//     numbers meet removes the whole restriction.
+//   * everything written here lands *behind* the cloud column and is multiplied
+//     by its transmittance, measured at 0.002 to 0.08. Most of the amplitude is
+//     spent before it reaches the pixel, and the only way to spend less is to
+//     truncate the march nearer, which is what put the hole there in the first
+//     place.
+//
+// The honest fix is still for the disturbance to be density in the volume rather
+// than light behind it, and it still belongs to `clouds.js`: a handful of
+// spheres in the field with a turbulence weight, fed from the `turbulenceAt()`
+// the simulation already publishes and nothing consumes. Everything above is
+// what a view file can reach, and it is not enough.
 //
 // --- what this file is not allowed to do -------------------------------------
 //
@@ -158,18 +273,22 @@ export const WAKE_HUNTER_VIEW = {
   // --- the tell ------------------------------------------------------------
 
   /**
-   * How far the streaks reach ahead of and behind the nose, in body lengths.
+   * How far the sleeve of disturbed vapour reaches ahead of and behind the
+   * nose, in body lengths, and how fat it gets.
    *
    * §10.3's turbulence field is 200 m in radius. 1.9 L ahead is 105 m, so the
    * disturbance genuinely arrives before the animal at roughly the scale the
    * contract states, and it sits inside the field rather than pretending to be
-   * all of it. Reaching much further ahead than this starts to look like the
-   * streaks are a separate object flying in formation with the creature.
+   * all of it. Reaching much further ahead than this stops reading as this
+   * animal's wake and starts reading as weather that happens to be there.
+   *
+   * 0.52 L of radius makes the sleeve about one body length across. That is the
+   * largest it can be for the reason in the header: whatever it covers, it
+   * replaces, and the only thing it is entitled to replace is medium.
    */
   tellAheadBodies: 1.9,
   tellBehindBodies: 2.6,
-  /** Radius of the sheared tube at the nose and at its tail, in body lengths. */
-  tellRadiusBodies: [0.20, 0.44],
+  tellRadiusBodies: 0.52,
 
   /**
    * Speeds between which the tell fades up, m/s.
@@ -183,50 +302,48 @@ export const WAKE_HUNTER_VIEW = {
   tellSpeedRange: [25, 120],
 
   /**
-   * Distances between which the tell fades out entirely, metres.
+   * How hard the medium is stirred, as a fraction of whatever brightness is
+   * already there, at the committed speed.
    *
-   * This exists to undo a cheat rather than to save time. Because the streaks
-   * write depth they are *not* subject to the atmospheric perspective that
-   * buries everything else: the march stops at them, so a filament two
-   * kilometres away arrives with almost none of the haze that should have eaten
-   * it, and against a lit mass it reads as a hard dark dash — see
-   * `evidence/wh_t_mid_zoom`, where the animals themselves are correctly reduced
-   * to silhouettes and their streaks are still crisp. Fading them by range is
-   * the shortest honest way to put back the falloff the depth write removed.
+   * There is no distance fade and there must not be one. The previous pass had
+   * `tellFadeRangeM: [500, 1400]`, which existed to hide a hole that got worse
+   * with range; a fraction of the background is *already* range-correct, because
+   * the background it is a fraction of has been through the same aerial
+   * perspective as everything else in the frame. Falloff now happens because the
+   * sleeve subtends fewer pixels, which is the only reason anything else in this
+   * game gets smaller.
    *
-   * The numbers are the archetype's own scale: §10.3's turbulence field is 200 m
-   * in radius, so a disturbance that has stopped being legible by fourteen of
-   * those is not losing the player anything they were meant to have.
+   * 1.0 means the medium can be doubled or scoured away entirely, which sounds
+   * violent and is not: almost all of it is spent on the way out. The stirring
+   * is written behind the whole cloud column and the composite multiplies it by
+   * that column's transmittance, which measures 0.002 to 0.08 through anything
+   * worth looking at, so what survives at the pixel is a small fraction of this
+   * number. Measured against the same frame with the stirring forced to zero,
+   * the mean change over the sleeve runs 1.0 level at an amplitude of 0 (that is
+   * the mechanism's own residual), 1.5 at 0.3, and 2.3 at 1.0.
+   *
+   * It is set where the signal is about twice the residual rather than where the
+   * picture is right, because at present the picture is not right — see the
+   * bottom of the header. Raising it further is safe (the residual does not move
+   * with it) and buys progressively less.
    */
-  tellFadeRangeM: [500, 1400],
+  tellAmplitude: 1.0,
+
   /**
-   * Peak alpha of one streak, and how wide one is in metres.
+   * Size of the turbulent features, in body lengths: across the flight axis and
+   * along it.
    *
-   * The alpha lives in the vertex colours rather than in `material.opacity`
-   * because the material has an `alphaTest` and the test has to see the strength:
-   * fading a ribbon out through the material would leave every vertex above the
-   * test threshold and keep cutting depth long after the streak stopped being
-   * visible.
+   * Anisotropic on purpose, and by a factor of four. Shear stretches structure
+   * along the flow, so features half a body length across and two body lengths
+   * long read as something being dragged through the air. Isotropic noise at the
+   * same scale reads as static.
    *
-   * 0.11 additive of a colour around 0.5 is a brightening of about 0.06 in
-   * linear light. The first pass ran three times that and the streaks read as
-   * lit structure rather than as air; the background here is 0.003–0.02, so a
-   * little goes a very long way. 0.55 m across, on a 55 m animal, is a filament —
-   * the whole reason it is not a sheet is in the header.
+   * The lateral figure is also load-bearing for the reconstruction: filaments
+   * have to be thin enough that a clean cloud-buffer tap exists within
+   * `TELL_TAP_TEXELS` of every fragment, or the tell starts sampling its own
+   * shadow and darkens back into the hole this rewrite exists to remove.
    */
-  tellAlpha: 0.20,
-  tellWidthM: 1.6,
-  /**
-   * Fallback linear RGB for the streaks, used only when there is no sky to ask.
-   *
-   * Normally the tint is *derived*, from `clouds.sky.haze` — the colour the far
-   * field of the medium already is. Authoring it here instead would be authoring
-   * the light twice, which is the failure `sky.js` was written to end: a fixed
-   * cold tint measured khaki against an indigo-only sky in `evidence/wh_g_hero4`
-   * because it was additive light of a colour nothing in the world was emitting.
-   * Disturbed vapour is lit by whatever is up, the same as undisturbed vapour.
-   */
-  tellTint: [0.50, 0.64, 1.00],
+  tellFeatureBodies: [0.50, 2.0],
 
   /**
    * Eyespot diameter in body lengths, and how bright.
@@ -267,28 +384,65 @@ const TAIL_RING = RINGS - 1;
 const BARBELS = 6;
 const BARBEL_STATIONS = 5;
 /**
- * The tell: how many filaments, how many stations along one, and how many
- * vertices across it.
+ * The tell's carrier: a closed spindle around the flight axis.
  *
- * Five across, and both earlier answers were wrong in a way worth recording.
- * Two across rasterised as a bar with hard parallel edges of uniform brightness
- * — `evidence/wh_e_hero2` looks like scaffolding. Three across, at half a metre
- * wide, became a hard one-pixel line: `evidence/wh_f_hero3` looks like hairs on
- * the lens. Vapour needs *width with a soft edge*, which is five vertices
- * carrying a bell of alpha across a filament wide enough to cover several
- * pixels at the range it matters.
+ * The geometry does nothing except deliver fragments over the region the
+ * disturbance occupies and give each one an object-space coordinate. Nothing is
+ * animated here and no vertex is ever rewritten — the churn lives entirely in
+ * `uScroll`, which is one float per frame instead of the 560 vertices per animal
+ * per frame the ribbons cost.
  *
- * Everything about this shape is forced by the depth problem in the header: a
- * broad soft shape would be the obvious way to draw disturbed air and it is
- * unavailable, because a broad shape that writes depth deletes a broad patch of
- * the cloud behind it. Narrow and soft is the only thing left.
+ * 20 x 14 is 560 triangles, and it is that coarse because the silhouette is
+ * never seen: `rimFade` in the shader takes the strength to zero where the
+ * surface turns edge-on, so the visible boundary of the sleeve is a fade rather
+ * than an outline and the facets are inside the part that has already faded out.
+ * That is the same reason there is no `alphaTest` any more — the shape ends by
+ * ceasing to perturb, not by an edge.
  */
-const TELL_RIBBONS = 16;
-const TELL_STATIONS = 7;
-const TELL_ACROSS = 5;
-/** Where the five sit across the filament, and how much alpha each carries. */
-const TELL_SPAN = [-1, -0.44, 0, 0.44, 1];
-const TELL_FALLOFF = [0, 0.55, 1, 0.55, 0];
+const TELL_STATIONS = 20;
+const TELL_RADIAL = 14;
+
+/**
+ * Spacing of the nine taps that read `B / cloud.a`, in half-res cloud texels.
+ *
+ * One, because that is the spacing `COMPOSITE_FRAG` reconstructs the cloud at,
+ * and this kernel exists to be the same kernel. See the comment at the taps.
+ *
+ * A plain weighted mean, not a rank filter. An earlier pass took the brightest
+ * of a spiral to reject taps the tell had truncated the frame before, and that
+ * was wrong twice over: a truncated tap is darker than a clean one against cloud
+ * but *brighter* against sky, because cutting the march short leaves the
+ * transmittance high and the sky term unattenuated, so the rejection inverted
+ * exactly when the background did. And any rank filter over a neighbourhood
+ * dilates: at a cloud edge it measured 155 where the truth was 21. Neither
+ * failure can happen now, because the depth claim means nothing here is
+ * truncated relative to what the composite is using.
+ */
+const TELL_TAP_TEXELS = 1.0;
+
+/**
+ * Ceiling on `1 / cloud.a` — how far the stirring may be pre-amplified.
+ *
+ * The perturbation is written *behind* the whole column, so it has to be
+ * pre-divided by the column's transmittance for the composite to multiply it
+ * back out, and that divide is the one genuinely fragile thing in the shader:
+ * an error of a few percent in a transmittance of 0.002 is an error of a few
+ * hundred percent in the light that comes back.
+ *
+ * 60 puts the knee at a transmittance of 0.017. Measured over the band the
+ * sleeve occupies, the median column reads 0.079 against a lit mass and 0.26
+ * against open sky, so a normal frame is delivered at full strength and what
+ * tails off is the inside of solid weather.
+ *
+ * The ceiling is set by stability, not by taste, and it was measured by panning
+ * the camera a degree between the frame the cloud buffer came from and the frame
+ * being drawn — which is what a brisk look-around actually does to the
+ * reprojection. Peak error against a still frame: 0.7 levels at a gain of 20,
+ * 1.3 at 60, 4.3 at 200, and 37 by a thousand, where a tap that disagrees with
+ * the composite about whether it is inside a cloud stops being a small error and
+ * starts being a flare. 60 is inside the flat part of that curve.
+ */
+const TELL_MAX_GAIN = 60.0;
 
 /**
  * Body profile, half-height and half-width at each ring as a fraction of the
@@ -348,18 +502,299 @@ function memberHash(i) {
   return x - Math.floor(x);
 }
 
+// ---------------------------------------------------------------------------
+// The tell's shader
+// ---------------------------------------------------------------------------
+//
+// GLSL ES 3.00, declared through `glslVersion: GLSL3` — the same as
+// `cloud.glsl.js`, which is the shader this one has to agree with. It is not
+// optional here: `gl_FragDepth` does not exist in ES 1.00 without an extension,
+// and writing depth is the mechanism.
+
+const TELL_VERT = /* glsl */`
+out vec3 vObj;
+out vec3 vWorld;
+out vec3 vNrm;
+out vec3 vView;
+void main() {
+  vObj = position;
+  vec4 wp = modelMatrix * vec4(position, 1.0);
+  vWorld = wp.xyz;
+  // World normal. Used only for the rim fade, so the non-uniform part of the
+  // model matrix (there is none — the view scales uniformly) does not matter.
+  vNrm = normalize(mat3(modelMatrix) * normal);
+  vec4 vp = viewMatrix * wp;
+  // View space is carried through because the composite's aerial term is a
+  // function of slant range, not of depth: it reconstructs a view-space z from
+  // the buffer and divides by cos(angle off axis). Reproducing that needs the
+  // angle, and the angle is the view-space direction. Using one distance for the
+  // whole sleeve instead puts a radial gradient of error across the frame — the
+  // corner of a 62 degree view is off axis by fifty.
+  //
+  // (No backticks anywhere in these shader strings: they are template literals,
+  // and a backtick in a comment ends the shader mid-word. It cost a boot.)
+  vView = vp.xyz;
+  gl_Position = projectionMatrix * vp;
+}
+`;
+
+const TELL_FRAG = /* glsl */`
+precision highp float;
+
+in vec3 vObj;
+in vec3 vWorld;
+in vec3 vNrm;
+in vec3 vView;
+layout(location = 0) out vec4 fragColor;
+
+uniform sampler2D uCloud;      // last frame's march: rgb in-scatter, a transmittance
+uniform vec2  uCloudTexel;     // 1 / cloudRT size
+uniform vec3  uPrevFwd;        // the basis that produced uCloud, not this frame's
+uniform vec3  uPrevRight;
+uniform vec3  uPrevUp;
+uniform vec2  uPrevTanHalf;
+
+uniform vec3  uSkyZenith;      // the composite's own sky, so the reconstruction
+uniform vec3  uSkyHorizon;     // of an empty pixel matches what it would have been
+uniform vec3  uSkyGround;
+uniform vec3  uHaze;
+uniform float uAerialK;
+
+uniform float uStrength;       // 0 at a drift, tellAmplitude at the committed speed
+uniform float uScroll;         // seconds of aft-streaming, pre-wrapped on the CPU
+uniform vec3  uSpan;           // object-space z ahead, z behind, sleeve radius
+uniform vec2  uFeature;        // turbulence cell size, lateral and along the axis
+uniform float uTapPx;          // ratio tap reach, in cloud-buffer texels
+uniform vec3  uSlab;           // cloud layer base, top, and the march's max range
+uniform vec2  uClipNF;         // camera near and far, for encoding gl_FragDepth
+
+// --- the sky, as COMPOSITE_FRAG builds it ---------------------------------
+//
+// The same two smoothsteps over the same three colours. The sun halo is left
+// out: it peaks at 0.02 against a horizon of 0.032 and only within about twelve
+// degrees of a light that is never on screen, and carrying it would mean this
+// file owning a copy of a number that belongs to the composite.
+vec3 tellSky(vec3 rd) {
+  float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
+  vec3 c = mix(uSkyGround, uSkyHorizon, smoothstep(0.10, 0.50, t));
+  return mix(c, uSkyZenith, smoothstep(0.50, 0.98, t));
+}
+
+float tellHash(vec3 p) {
+  p = fract(p * 0.3183099 + vec3(0.71, 0.113, 0.419));
+  p *= 17.0;
+  return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+float tellNoise(vec3 x) {
+  vec3 i = floor(x), f = fract(x);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(mix(tellHash(i + vec3(0,0,0)), tellHash(i + vec3(1,0,0)), f.x),
+        mix(tellHash(i + vec3(0,1,0)), tellHash(i + vec3(1,1,0)), f.x), f.y),
+    mix(mix(tellHash(i + vec3(0,0,1)), tellHash(i + vec3(1,0,1)), f.x),
+        mix(tellHash(i + vec3(0,1,1)), tellHash(i + vec3(1,1,1)), f.x), f.y), f.z);
+}
+
+void main() {
+  vec3 toEye = vWorld - cameraPosition;
+  float dist = length(toEye);
+  vec3 rd = toEye / max(dist, 1e-4);
+
+  // --- how hard the medium is stirred here ---------------------------------
+  //
+  // u runs 0 at the leading tip of the sleeve to 1 at the trailing one.
+  float u = clamp((vObj.z - uSpan.x) / (uSpan.y - uSpan.x), 0.0, 1.0);
+
+  // Swirl before sampling: the sleeve is rolled about its own axis at a rate
+  // that varies along it, so the filaments wind rather than lying in planes.
+  // Without this the noise is stationary in the animal's frame and the whole
+  // disturbance reads as a decal painted on a tube.
+  float roll = uScroll * 0.55 + u * 2.3;
+  float cs = cos(roll), sn = sin(roll);
+  vec2 sw = vec2(vObj.x * cs - vObj.y * sn, vObj.x * sn + vObj.y * cs);
+  vec3 q = vec3(sw / uFeature.x, vObj.z / uFeature.y + uScroll);
+
+  // Two octaves. A third buys detail finer than the filaments the taps can see
+  // around, which is the resolution limit set out in the header.
+  float n = tellNoise(q) * 0.66 + tellNoise(q * 2.7 + 11.3) * 0.34;
+  n = n * 2.0 - 1.0;
+
+  // Ridges, not blobs. Everything under the knee is flat air; what survives is
+  // thin signed filaments — piled up where n is high, scoured where it is low.
+  // A plain n would fill the whole sleeve and there would be no clean tap left
+  // anywhere inside it.
+  float s = n * smoothstep(0.30, 0.85, abs(n));
+
+  // Ends: fade to nothing well inside the geometry so the spindle has no tip.
+  float ends = smoothstep(0.0, 0.22, u) * (1.0 - smoothstep(0.72, 1.0, u));
+  // Rim: the drawn surface is the far wall of the sleeve, so it turns edge-on
+  // exactly at the silhouette. Killing the strength there is what removes the
+  // outline — the shape ends in a fade instead of a boundary, which is the whole
+  // difference between vapour and a prop.
+  float rim = pow(abs(dot(vNrm, rd)), 0.8);
+
+  s *= uStrength * ends * rim;
+
+  // No discard, and that is deliberate — it is the opposite of what an
+  // alpha-tested effect wants and it was measured both ways.
+  //
+  // Every fragment of this sleeve writes a depth far from anything else in the
+  // frame, and COMPOSITE_FRAG reconstructs the cloud with a filter that refuses
+  // to mix samples whose depths disagree. So every edge of the drawn region is a
+  // seam in that reconstruction. Discarding the weak fragments makes an edge
+  // around *every filament*: it measured a 92-level fringe. Drawing all of them
+  // leaves exactly one edge, the sleeve's own outline, where the rim fade has
+  // already taken the strength to nothing — 28 levels at worst, and falling.
+  //
+  // --- how much light one unit of s is worth --------------------------------
+  //
+  // Re-project into the buffer's own frame first. uPrev* is the basis the march
+  // used, which is one frame behind this one; inverting COMPOSITE_FRAG's ray
+  // construction with it makes the lookup exact under rotation.
+  float pz = max(dot(rd, uPrevFwd), 1e-3);
+  // Clamped, not discarded, for the reason above: a fragment that fell outside
+  // last frame's frustum still has to write its depth, or the frame edge grows a
+  // seam every time the camera turns. Clamping reads the nearest edge texel,
+  // which is the right answer to within the parallax of one frame.
+  vec2 uv = clamp(vec2(dot(rd, uPrevRight) / (pz * uPrevTanHalf.x),
+                       dot(rd, uPrevUp)    / (pz * uPrevTanHalf.y)) * 0.5 + 0.5,
+                  vec2(0.0), vec2(1.0));
+
+  vec3 sky = tellSky(rd);
+  // The same three-by-three Gaussian COMPOSITE_FRAG reconstructs the cloud with,
+  // and for the same reason: what this fragment needs is not the background but
+  // the *ratio* the composite is about to divide by, and a ratio taken through a
+  // different filter than the divisor is not that ratio.
+  //
+  // This was measured. A five-tap spiral at 1.5 texels overshot by a factor of
+  // three where the kernels disagreed most — across a hard cloud silhouette,
+  // where the transmittance swings from 0.9 to 0.01 inside the neighbourhood —
+  // and put an 88-level darkening on filaments meant to carry about twenty.
+  vec4 acc = vec4(0.0);
+  float wsum = 0.0;
+  for (int j = -1; j <= 1; j++) {
+    for (int i = -1; i <= 1; i++) {
+      float w = exp(-float(i * i + j * j) * 0.9);
+      acc += texture(uCloud, uv + vec2(i, j) * uTapPx * uCloudTexel) * w;
+      wsum += w;
+    }
+  }
+  acc /= wsum;
+
+  // B is the composite's own expression for a pixel with nothing in it. The
+  // divide by the column's transmittance is what the composite is about to undo
+  // when it multiplies the scene buffer by that same number: between them the
+  // fragment delivers exactly s * B of change and the background passes
+  // through untouched.
+  //
+  // The divide is bounded, and the bound is the honest limit of this whole
+  // approach. Transmittance in this world runs from 0.68 down to 0.0013 —
+  // measured, three decades — and a divide by the bottom of that range amplifies
+  // every disagreement between this frame's cloud and last frame's by the same
+  // three decades. Unbounded it put 200-level flares on filaments meant to carry
+  // twenty. Bounded at TELL_MAX_GAIN the stirring is delivered in full wherever
+  // the column still passes 1 / TELL_MAX_GAIN of its light, and tails off into
+  // masses more opaque than that, which is most of the way to being right for
+  // the wrong reason: a disturbance in the clear air in front of a solid wall of
+  // cloud does not have much to disturb.
+  vec3 B = acc.rgb + acc.a * sky;
+  vec3 ratio = B * min(1.0 / max(acc.a, 1.0e-4), ${TELL_MAX_GAIN.toFixed(1)});
+
+  // --- decide where to claim to be -----------------------------------------
+  //
+  // MARCH_FRAG clips every ray to the cloud slab before it starts, and stops at
+  // whichever comes first, the slab or uMaxDist. Reproducing that clip here
+  // gives the one distance at which writing depth costs *nothing*: claim to be
+  // exactly where the march was going to stop anyway and the column it
+  // accumulates over this pixel is unchanged, sample for sample.
+  //
+  // Only rays that stay inside the layer past the far plane — everything within
+  // about eight degrees of level, from inside the deck — cannot be given that
+  // distance, and those settle for the far plane and lose the tail beyond it.
+  float sT0 = 0.0, sT1 = uSlab.z;
+  if (abs(rd.y) > 1e-5) {
+    float a = (uSlab.x - cameraPosition.y) / rd.y;
+    float b = (uSlab.y - cameraPosition.y) / rd.y;
+    sT0 = max(sT0, min(a, b));
+    sT1 = min(sT1, max(a, b));
+  }
+  sT0 = max(sT0, 0.0);
+  // How far this particular fragment is allowed to claim. The limit is the far
+  // plane in *view-space z*, and view-space z is the slant range foreshortened
+  // by the angle off the view axis — so a pixel in the corner of a 62 degree
+  // frame, fifty degrees off axis, can honestly claim half again as far as one
+  // in the middle. Using the far plane as a slant range instead throws that away
+  // and truncates the edges of the frame harder than it has to.
+  float cosA = -vView.z / max(length(vView), 1e-4);
+  float farLimit = uClipNF.y * 0.999 / max(cosA, 0.30);
+  bool inSlab = sT1 > sT0;
+
+  // --- exact, or not at all -------------------------------------------------
+  //
+  // If the claim has to be clamped, the march loses everything between the far
+  // plane and uMaxDist over this fragment, and that loss is not subtle: with the
+  // stirring forced to zero it deletes whole distant cloud banks inside the
+  // sleeve's outline and leaves a hard curved seam where the sleeve ends — see
+  // evidence/whN_lit_150_on against its _off, and the amplified difference that
+  // goes with it. It is the same failure the ribbons had, in a new place.
+  //
+  // Fading the stirring cannot fix it, because the loss does not go through the
+  // stirring; only *not writing depth* fixes it. So this fragment does not
+  // write depth at all unless the claim can be honoured exactly, and the
+  // strength is taken to zero as that limit is approached so the boundary is a
+  // fade rather than an edge.
+  //
+  // The cost is stated plainly because it is large. From inside the deck, a ray
+  // has to be more than about eight degrees off level to leave the layer within
+  // twelve kilometres, so a pack viewed level — which is most of the time, since
+  // they fly at your altitude — has no tell. That is not a tuning choice: the
+  // march runs to 24 km and the camera main.js builds ends at 12, and no depth a
+  // view can write reaches past the second number. Raising camera.far to meet
+  // uMaxDist, or lowering uMaxDist to meet it, removes this entirely and is a
+  // one-line change in a file this one does not own.
+  float honest = inSlab ? 1.0 - smoothstep(0.80, 1.0, sT1 / farLimit) : 0.0;
+  if (honest <= 0.0) discard;
+  s *= honest;
+  float claim = clamp(sT1, 1.0, farLimit);
+
+  // The march dims the *sky* by the mist it crossed, but only for pixels with no
+  // geometry in them — geometry is faded by the composite instead, so that it is
+  // not fogged twice. Writing depth flips this pixel from the first rule to the
+  // second, and the sky term arrives undimmed unless it is dimmed here. Left
+  // out, it measured as a broad, hard-edged brightening over the whole sleeve.
+  float mist = exp(-uAerialK * (sT1 - sT0));
+
+  // --- write it where the composite will find it ----------------------------
+  //
+  // The composite mixes the scene buffer toward haze by the aerial term before
+  // it uses it, and computes that term from the slant range it reconstructs out
+  // of the depth this shader is about to write — not from where the sleeve
+  // actually is. Same distance, both sides.
+  float aer = 1.0 - exp(-claim * uAerialK);
+  vec3 scene = (sky * mist + s * ratio - uHaze * aer) / max(1.0 - aer, 1e-3);
+
+  // Window depth for a point at the claimed slant range along this ray. The depth
+  // buffer holds view-space z, which is the slant range foreshortened by the
+  // angle off the view axis, and the composite divides that back out.
+  float viewZ = max(claim * cosA, uClipNF.x * 2.0);
+  float ndc = ((uClipNF.y + uClipNF.x) - 2.0 * uClipNF.y * uClipNF.x / viewZ)
+            / (uClipNF.y - uClipNF.x);
+  gl_FragDepth = 0.5 * (ndc + 1.0);
+  fragColor = vec4(max(scene, vec3(0.0)), 1.0);
+}
+`;
+
 /**
  * One Wake Hunter, drawn.
  *
  * Three meshes at most, and only one of them at range:
  *   body   — spine, fins, caudal and filaments in a single buffer, one draw call
- *   tell   — the sheared vapour; gone past `tellFadeRangeM`, so in practice near
- *            and the first couple of hundred metres of mid
+ *   tell   — the sleeve of stirred vapour; near and mid, dropped at far
  *   eyes   — two quads, near only
  *
- * Measured, seven members: 23 draw calls and 7,732 triangles with every one of
- * them inside 1,200 m, against budgets of 120 and 400,000. At 2.3 km the same
- * pack is 9 calls and 1,992 triangles.
+ * Measured, five members with all of them inside 1,200 m: 17 draw calls and
+ * 8,110 triangles, against budgets of 120 and 400,000.
  */
 export class WakeHunterView extends CreatureView {
   constructor(creature, opts = {}) {
@@ -408,13 +843,18 @@ export class WakeHunterView extends CreatureView {
     this._prevHeading = creature.heading || 0;
     this._yawRate = 0;
     this._barbelPhase = 0;
-    this._tellScroll = 0;
     this._deformTick = 0;
     this._lastLod = null;
     this._tellAllowed = false;
     this._camDist = 0;
-    this._tintAt = 0;
-    this._tint = Float32Array.from(WAKE_HUNTER_VIEW.tellTint);
+    /**
+     * Per-member offset into the turbulence, in the scroll's own units.
+     *
+     * Without it every animal in the pack is standing inside a bit-for-bit
+     * identical disturbance, and five identical patterns moving together read as
+     * one texture rather than as five animals stirring their own air.
+     */
+    this._tellScroll = h * 37.0;
 
     // Reused scratch: the spine, resolved once per deform and read by the body,
     // the fins, the caudal and the filaments. PERFORMANCE_BUDGET forbids
@@ -633,68 +1073,131 @@ export class WakeHunterView extends CreatureView {
   }
 
   /**
-   * The tell: streaks of sheared vapour on the flight axis.
+   * The tell: a sleeve of stirred vapour on the flight axis.
    *
-   * Nine ribbons on a cone around the axis, each covering a fraction of the
-   * span and sliding aft. Tangential rather than radial width, so the ones at
-   * the top and bottom of the tube present their faces to a camera watching from
-   * the flank — which is the angle this creature is supposed to be seen from.
+   * A closed spindle, built once and never touched again. Its radius goes to
+   * zero at both tips, which is what closes it — a capped cylinder would put a
+   * disc of constant depth across the nose, and a disc is exactly the kind of
+   * flat-ended shape the review caught the ribbons being.
    */
   _buildTell() {
+    const L = this.L;
+    const zA = L * WAKE_HUNTER_VIEW.tellAheadBodies;
+    const zB = -L * WAKE_HUNTER_VIEW.tellBehindBodies;
+    const rMax = L * WAKE_HUNTER_VIEW.tellRadiusBodies;
+
+    const pos = [];
+    const nrm = [];
     const idx = [];
-    const verts = TELL_RIBBONS * TELL_STATIONS * TELL_ACROSS;
-    const pos = new Float32Array(verts * 3);
-    const col = new Float32Array(verts * 4);   // RGBA: the alpha is the fade
-    for (let k = 0; k < TELL_RIBBONS; k++) {
-      const base = k * TELL_STATIONS * TELL_ACROSS;
-      for (let n = 0; n < TELL_STATIONS - 1; n++) {
-        const a = base + n * TELL_ACROSS, b = base + (n + 1) * TELL_ACROSS;
-        for (let e = 0; e < TELL_ACROSS - 1; e++) {
-          idx.push(a + e, b + e, a + e + 1);
-          idx.push(a + e + 1, b + e, b + e + 1);
-        }
+    for (let n = 0; n < TELL_STATIONS; n++) {
+      const u = n / (TELL_STATIONS - 1);
+      const z = lerp(zA, zB, u);
+      // sin(pi u)^0.6 rather than sin(pi u): the 0.6 fattens the sleeve early
+      // and holds it wide over most of its length, so the profile is a spindle
+      // with blunt shoulders rather than a rugby ball. The ball tapers so far
+      // ahead of the nose that the disturbance stops covering the part of the
+      // sky the animal is about to arrive from, which is the one part §10.3
+      // cares about.
+      const r = rMax * Math.pow(Math.sin(Math.PI * Math.max(u, 1e-4)), 0.6);
+      // Slope of the profile, for the true surface normal. A cylinder's normal
+      // (radial, flat) would make `rimFade` wrong near the tips: the surface
+      // there is nearly perpendicular to the axis, and calling it radial would
+      // hold the strength up exactly where the shape is supposed to have ended.
+      const du = 1 / (TELL_STATIONS - 1);
+      const u0 = Math.max(u - du, 1e-4), u1 = Math.min(u + du, 1 - 1e-4);
+      const dr = rMax * (Math.pow(Math.sin(Math.PI * u1), 0.6)
+                       - Math.pow(Math.sin(Math.PI * u0), 0.6));
+      const dz = (zB - zA) * (u1 - u0);
+      // Outward normal of a surface of revolution: (-z', r') in the (radial, z)
+      // plane. `rimFade` only ever takes its absolute value, so a sign error
+      // here is invisible — which is exactly why it is worth getting right on
+      // paper rather than by looking at a capture.
+      const nr = -dz, nz = dr;
+      const nl = Math.hypot(nz, nr) || 1;
+      for (let j = 0; j < TELL_RADIAL; j++) {
+        const th = (j / TELL_RADIAL) * TAU;
+        const cx = Math.cos(th), cy = Math.sin(th);
+        pos.push(cx * r, cy * r, z);
+        nrm.push(cx * nr / nl, cy * nr / nl, nz / nl);
       }
     }
+    for (let n = 0; n < TELL_STATIONS - 1; n++) {
+      const a = n * TELL_RADIAL, b = (n + 1) * TELL_RADIAL;
+      for (let j = 0; j < TELL_RADIAL; j++) {
+        const k = (j + 1) % TELL_RADIAL;
+        idx.push(a + j, b + j, a + k);
+        idx.push(a + k, b + j, b + k);
+      }
+    }
+
     const g = new THREE.BufferGeometry();
-    const p = new THREE.BufferAttribute(pos, 3); p.setUsage(THREE.DynamicDrawUsage);
-    const c = new THREE.BufferAttribute(col, 4); c.setUsage(THREE.DynamicDrawUsage);
-    g.setAttribute('position', p);
-    g.setAttribute('color', c);
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+    g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(nrm), 3));
     g.setIndex(idx);
     g.boundingSphere = new THREE.Sphere(
-      new THREE.Vector3(0, 0, -this.L * 0.4), this.L * 3.0);
+      new THREE.Vector3(0, 0, (zA + zB) * 0.5), (zA - zB) * 0.5 + rMax);
 
-    // Additive, so this brightens the vapour rather than being a surface in it,
-    // and depth-writing, because the cloud march is bounded by the depth buffer
-    // and anything that does not write depth is composited away. See the header.
-    // `alphaTest` keeps the faded ends from writing depth they cannot pay for.
-    const m = new THREE.MeshBasicMaterial({
-      color: 0xffffff,             // the tint lives in the vertex colours
-      vertexColors: true,
-      transparent: true,
-      opacity: 1,                  // strength is in the vertex alpha, not here
-      alphaTest: 0.02,
-      blending: THREE.AdditiveBlending,
+    /**
+     * Opaque, back faces only, and no blending at all.
+     *
+     * No blending because the value written *is* the answer: it is the exact
+     * number that makes `COMPOSITE_FRAG` land on a stirred background, and a
+     * fraction of it would land somewhere else.
+     *
+     * Back faces because the sleeve is a closed shell and both walls write the
+     * same depth, so drawing both would rasterise every pixel twice for one
+     * result. Which wall is kept is not arbitrary: the far one is the surface
+     * whose normal turns edge-on at the silhouette in the direction `rimFade`
+     * expects, and it is the one whose object-space coordinate puts the noise
+     * behind the animal rather than in front of it.
+     *
+     * Two sleeves that overlap on screen do not compound — the depth test is
+     * `LessEqual` and both are at the same depth, so the later draw replaces the
+     * earlier. Both fade to nothing at their rims, so what that costs is a soft
+     * boundary between two low-contrast fields rather than a seam.
+     */
+    const m = new THREE.ShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      vertexShader: TELL_VERT,
+      fragmentShader: TELL_FRAG,
+      uniforms: {
+        uCloud: { value: null },
+        uCloudTexel: { value: new THREE.Vector2(1 / 640, 1 / 360) },
+        uPrevFwd: { value: new THREE.Vector3(0, 0, -1) },
+        uPrevRight: { value: new THREE.Vector3(1, 0, 0) },
+        uPrevUp: { value: new THREE.Vector3(0, 1, 0) },
+        uPrevTanHalf: { value: new THREE.Vector2(1, 1) },
+        uSkyZenith: { value: new THREE.Vector3() },
+        uSkyHorizon: { value: new THREE.Vector3() },
+        uSkyGround: { value: new THREE.Vector3() },
+        uHaze: { value: new THREE.Vector3() },
+        uAerialK: { value: 9.0e-5 },
+        uStrength: { value: 0 },
+        uScroll: { value: this._tellScroll },
+        uSpan: { value: new THREE.Vector3(zA, zB, rMax) },
+        uFeature: {
+          value: new THREE.Vector2(L * WAKE_HUNTER_VIEW.tellFeatureBodies[0],
+                                   L * WAKE_HUNTER_VIEW.tellFeatureBodies[1]),
+        },
+        uTapPx: { value: TELL_TAP_TEXELS },
+        uSlab: { value: new THREE.Vector3(-900, 2600, 24000) },
+        uClipNF: { value: new THREE.Vector2(0.5, 12000) },
+      },
+      side: THREE.BackSide,
+      transparent: false,
       depthWrite: true,
-      side: THREE.DoubleSide,
-      // Three draws a transparent double-sided material twice — back faces then
-      // front — so that it sorts correctly. Measured: a pack of seven cost 37
-      // draw calls instead of 23 and reported double the triangles. Additive
-      // blending is order-independent by construction, so the second pass buys
-      // nothing and costs a draw call per animal.
-      forceSinglePass: true,
-      toneMapped: true,
+      depthTest: true,
+      blending: THREE.NoBlending,
     });
     m.userData.owned = true;       // per-view, so `dispose()` may free it
 
     this._tellGeo = g;
-    this._tellPos = p;
-    this._tellCol = c;
+    this._tellMat = m;
     this._tell = new THREE.Mesh(g, m);
-    this._tell.renderOrder = 1;    // after the body, so it never sorts in front
     this._tell.frustumCulled = true;
-    // Off until something has decided how strong it is. The buffers are still
-    // zeroed at this point and a zeroed ribbon is a degenerate quad at the nose.
+    // Off until something has decided how strong it is, and off for good if the
+    // clouds are not running: with no `cloudRT` there is no background to give
+    // back, and a sleeve that guesses one is the artefact this replaced.
     this._tell.visible = false;
     this.object3D.add(this._tell);
   }
@@ -782,11 +1285,15 @@ export class WakeHunterView extends CreatureView {
     const lod = this.lodLevel;
     if (lod !== this._lastLod) { this._applyLod(lod); this._lastLod = lod; }
 
-    // Ask the sky what colour the medium is, twice a second. Cheap, and it means
-    // the tell shifts when the luminaries do, exactly like the vapour it is
-    // supposed to be part of.
-    this._tintAt -= dt;
-    if (this._tintAt <= 0) { this._tintAt = 0.5; this._readTint(ctx); }
+    // The tell updates every frame it is allowed, *before* the deform throttle
+    // below and outside it. It has to: `uPrevFwd` and its three companions are
+    // the camera basis the cloud buffer was marched with, and running them at
+    // half rate at `mid` LOD would leave every other frame reconstructing the
+    // background through a basis two frames stale — which is a smear across the
+    // whole sleeve exactly when the player is turning to look at the pack.
+    if (this._tellAllowed) {
+      this._updateTell(dt, clamp01((c.speed || 0) / 120), ctx);
+    }
 
     // Deform rate by LOD. At `far` the body is a couple of dozen pixels across
     // and the wave is sub-pixel, so it is frozen entirely — which is most of the
@@ -795,23 +1302,6 @@ export class WakeHunterView extends CreatureView {
     if (lod === 'far') return;
     if (lod === 'mid' && (this._deformTick & 1)) return;
     this._deform(dt);
-  }
-
-  /**
-   * The colour of the tell, taken from the medium rather than authored.
-   *
-   * `sky.haze` is the far-field colour of the vapour under the luminaries that
-   * are currently up. Normalised to a peak of one, because the *hue* is what is
-   * wanted here — how bright a streak gets is `tellAlpha`'s decision, and the
-   * haze is a hundredth of unity so using it directly would draw nothing.
-   */
-  _readTint(ctx) {
-    const sky = ctx && ctx.clouds && ctx.clouds.sky;
-    const h = sky && sky.haze;
-    if (!h) return;
-    const peak = Math.max(h.x, h.y, h.z);
-    if (!(peak > 0)) return;
-    this._tint[0] = h.x / peak; this._tint[1] = h.y / peak; this._tint[2] = h.z / peak;
   }
 
   _applyLod(lod) {
@@ -853,7 +1343,6 @@ export class WakeHunterView extends CreatureView {
 
     this._solveSpine(amp);
     this._deformBody(dt);
-    if (this._tellAllowed) this._updateTell(dt, drive);
     if (this._eyes.visible) {
       const [lo, hi] = WAKE_HUNTER_VIEW.eyeOpacity;
       // Brighter with attention. Not with the chirp: the chirp is a sound and
@@ -953,92 +1442,65 @@ export class WakeHunterView extends CreatureView {
   }
 
   /**
-   * The streaks. Positions and alphas both, because a ribbon that only changes
-   * opacity does not read as something moving past.
+   * The tell, per frame: eleven uniforms and no geometry work at all.
+   *
+   * Everything that used to be a vertex write is now `uScroll`. The sleeve is
+   * static and the disturbance moves through it, which is the right way round —
+   * the medium is not carried along by the animal, it is left behind by it.
    */
-  _updateTell(dt, drive) {
-    const L = this.L;
+  _updateTell(dt, drive, ctx) {
     const [s0, s1] = WAKE_HUNTER_VIEW.tellSpeedRange;
-    const [f0, f1] = WAKE_HUNTER_VIEW.tellFadeRangeM;
     const strength = clamp01(((this.creature.speed || 0) - s0) / Math.max(s1 - s0, 1))
-      * (1 - clamp01((this._camDist - f0) / Math.max(f1 - f0, 1)));
-    // Below the alpha test nothing survives rasterisation, so there is no point
-    // moving 180 vertices to produce a mesh that discards every fragment.
-    this._tell.visible = strength * WAKE_HUNTER_VIEW.tellAlpha > 0.02;
+      * WAKE_HUNTER_VIEW.tellAmplitude;
+
+    // Aft-streaming rate, in feature-lengths per second. Fast: a slow scroll
+    // makes the disturbance look attached to the animal instead of passed
+    // through by it. Wrapped well inside float32's exact-integer range, because
+    // this feeds a noise lookup and a coordinate that has grown past about 2^22
+    // quantises into visible stair-steps after twenty minutes of flying.
+    this._tellScroll += dt * (0.25 + 1.15 * drive);
+    if (this._tellScroll > 4096) this._tellScroll -= 4096;
+
+    const clouds = ctx && ctx.clouds;
+    const rt = clouds && clouds.cloudRT;
+    const cu = clouds && clouds.compositeUniforms;
+    const sky = clouds && clouds.sky;
+    // No march buffer, no reconstruction, no tell. Drawing one anyway would mean
+    // inventing a background, and inventing a background is the entire defect
+    // this rewrite removed.
+    this._tell.visible = strength > 0.004 && !!(rt && cu && sky);
     if (!this._tell.visible) return;
 
-    const zA = L * WAKE_HUNTER_VIEW.tellAheadBodies;
-    const zB = -L * WAKE_HUNTER_VIEW.tellBehindBodies;
-    const [r0, r1] = WAKE_HUNTER_VIEW.tellRadiusBodies;
-    // Aft-streaming rate. Fast: the medium is not being pushed along with the
-    // animal, it is being left behind by it, and a slow scroll makes the streaks
-    // look attached instead of passed through.
-    this._tellScroll += dt * (0.20 + 0.85 * drive);
-
-    const p = this._tellPos.array;
-    const col = this._tellCol.array;
-    const tint = this._tint;
-    for (let k = 0; k < TELL_RIBBONS; k++) {
-      const hk = memberHash(k + this.creature.packIndex * 31);
-      // Golden-ratio spacing around the axis so twelve filaments never line up
-      // into a visible fan, plus a slow drift so the whole sleeve churns.
-      const th0 = k * 2.39996 + this._tellScroll * (0.5 + hk);
-      // Every filament sits at its own radius and is its own length. Uniform
-      // ones produced a cylinder, and a cylinder seen from the flank is two
-      // parallel arcs — which is exactly what the first capture showed.
-      // Radius and length per filament. Both hug the animal much more closely
-      // than the first pass did: filaments scattered out to two-thirds of a body
-      // length read as unrelated debris in the sky rather than as this thing's
-      // wake, and the sheath has to be legibly *attached* to what is inside it.
-      const rf = 0.35 + hk * 1.10;
-      const rib = 0.07 + hk * 0.09;
-      let start = (k / TELL_RIBBONS + this._tellScroll * (0.8 + hk * 0.5)) % 1;
-      if (start < 0) start += 1;
-      start = start * (1 + rib) - rib;   // enters ahead, leaves behind
-      for (let n = 0; n < TELL_STATIONS; n++) {
-        const local = n / (TELL_STATIONS - 1);
-        const u = clamp01(start + local * rib);
-        const z = lerp(zA, zB, u);
-        // Radius wobbles along the filament, so it snakes rather than lying on
-        // a cone. Turbulence that runs in straight lines is not turbulence.
-        const wob = 1 + 0.22 * Math.sin(u * 9.0 + hk * 12.0)
-                      + 0.11 * Math.sin(u * 21.0 - hk * 7.0);
-        const rad = L * lerp(r0, r1, u) * rf * wob;
-        const th = th0 + u * (1.1 + hk * 1.6);
-        // Width in metres, not radians. Angular width made the far end of every
-        // filament a thirty-metre sheet, and a sheet that writes depth cuts a
-        // sheet-sized hole in the cloud behind it. See the header.
-        const dth = WAKE_HUNTER_VIEW.tellWidthM / Math.max(rad, 1);
-        // Fades to nothing at both its own ends and both ends of the span, so a
-        // filament that wraps round to the front does it while invisible.
-        //
-        // Cubed, not squared. The exponent decides how much of a filament sits
-        // above the alpha test and therefore how much of it writes depth, and
-        // depth is what cuts the cloud behind it: `evidence/wh_l_turn` has one
-        // filament crossing a lit mass and it reads there as a hard dark bar,
-        // because it deleted a bright background and replaced it with a dim
-        // additive line. A sharper fade shortens that bar to something that
-        // reads as a tatter instead of as an artefact. It cannot remove it.
-        const a = Math.sin(Math.PI * local) * Math.sin(Math.PI * u);
-        const alpha = a * a * a * strength * WAKE_HUNTER_VIEW.tellAlpha;
-        const i = (k * TELL_STATIONS + n) * TELL_ACROSS;
-        for (let e = 0; e < TELL_ACROSS; e++) {
-          const t = th + TELL_SPAN[e] * dth;
-          const o = (i + e) * 3;
-          p[o] = Math.cos(t) * rad;
-          p[o + 1] = Math.sin(t) * rad;
-          p[o + 2] = z;
-          const q = (i + e) * 4;
-          // Cold, and barely coloured: this is vapour catching whatever is up,
-          // not a light of the creature's own. The outer pair carry no alpha at
-          // all — that soft edge is what makes a filament instead of a bar.
-          col[q] = tint[0]; col[q + 1] = tint[1]; col[q + 2] = tint[2];
-          col[q + 3] = alpha * TELL_FALLOFF[e];
-        }
-      }
-    }
-    this._tellPos.needsUpdate = true;
-    this._tellCol.needsUpdate = true;
+    const u = this._tellMat.uniforms;
+    u.uStrength.value = strength;
+    u.uScroll.value = this._tellScroll;
+    u.uCloud.value = rt.texture;
+    u.uCloudTexel.value.set(1 / rt.width, 1 / rt.height);
+    // The camera basis that produced the buffer, which is *last* frame's: the
+    // scene pass runs before the march, so `compositeUniforms` still holds the
+    // values written after the previous scene render. Taking this frame's camera
+    // instead would look correct while standing still and smear the whole
+    // reconstruction sideways the moment the player turned.
+    u.uPrevFwd.value.copy(cu.uCamFwd.value);
+    u.uPrevRight.value.copy(cu.uCamRight.value);
+    u.uPrevUp.value.copy(cu.uCamUp.value);
+    u.uPrevTanHalf.value.copy(cu.uTanHalf.value);
+    u.uAerialK.value = cu.uAerialK.value;
+    // Everything the fragment needs to work out where the march would have
+    // stopped, taken from the march's own uniforms rather than restated. If the
+    // slab or the range ever move, this moves with them; a copy of the numbers
+    // here would be a second opinion about where the weather is.
+    const mu = clouds.marchUniforms;
+    u.uSlab.value.set(mu.uLayer.value.x, mu.uLayer.value.y, mu.uMaxDist.value);
+    u.uClipNF.value.copy(cu.uClip.value);
+    // The sky the composite would have drawn here. Read from the luminaries
+    // rather than authored, for the same reason the old tint was: a colour
+    // written down in this file is a second opinion about the light, and
+    // `sky.js` exists to end second opinions.
+    u.uSkyZenith.value.copy(sky.skyZenith);
+    u.uSkyHorizon.value.copy(sky.skyHorizon);
+    u.uSkyGround.value.copy(sky.skyGround);
+    u.uHaze.value.copy(sky.haze);
   }
 
   /**

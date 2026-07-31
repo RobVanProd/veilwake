@@ -13,10 +13,13 @@
 // harder rule — no light of any kind. Every other body in the roster gets to
 // solve "how do I read at 2 km" with emission. This one cannot. What carries it
 // is silhouette, the sheen off a wet flank, and the fact that cloud eats most of
-// it. The one thing here that adds light is `RIM_*`, a grazing-angle term that
-// exists because a measurement demanded it: with only albedo, a 240 m animal
-// against clear dark sky differed from the empty frame by **three levels out of
-// 255**. It is not on the photic channel and no creature can see it.
+// it. Two things here add light and neither is emission. `RIM_*` is an absolute
+// grazing-angle term that exists because a measurement demanded it: with only
+// albedo, a 240 m animal against clear dark sky differed from the empty frame by
+// **three levels out of 255**. `SKY_FILL` and `SHEEN_*` are the sky, reflected —
+// strictly a fraction of the radiance that is already in the frame, so the body
+// can never be brighter than what is behind it. Neither is on the photic channel
+// and no creature can see either.
 //
 // **It hunts by sound, omnidirectionally.** §10.1's sense table says
 // omnidirectional, which rules out the obvious design — a dish on the front. So
@@ -271,6 +274,49 @@ const VANE_CHORD_SHAPE = [1.00, 1.08, 0.96, 0.64, 0.20];
 const VANE_LIFT_M = [0.5, 1.1, 1.7, 2.3];
 
 /**
+ * How far a folded panel's normal is tilted away from the hull's, at the tip.
+ *
+ * This number is the difference between tissue and plating, and it took a
+ * capture to find. The panels are flat quads and `computeVertexNormals` used to
+ * run over them, which gives every vertex of a panel very nearly the same
+ * normal — so each one shaded as a single flat tone with a hard boundary, and a
+ * folded animal came out covered in **pale rectangles**: read as riveted plates,
+ * or as a row of lit windows, on a creature that is supposed to be soft
+ * (`bc1_L_dark_500_zoom.png`, before this change).
+ *
+ * A membrane lying against a body follows that body's curvature. So the normals
+ * are authored rather than computed: the hull's own outward direction at the
+ * root, tilting `VANE_TILT` radians toward the free edge across the span. That
+ * gives each panel a continuous gradient that begins exactly where the flank
+ * underneath it left off, and lifts only at its trailing edge — which is what
+ * catches the light on a real membrane and is the only part of it that should.
+ *
+ * Zero makes a folded panel shade identically to the hull and it disappears
+ * completely; past about 0.9 the tip swings far enough that the hard-plate look
+ * comes back, pointing the other way.
+ */
+const VANE_TILT = 0.40;
+
+/**
+ * Chord-wise camber of a panel's normals: how far the leading and trailing
+ * edges lean along the body, away from the panel's own face.
+ *
+ * The panels are one quad thick across the chord, so with a single face normal
+ * they shade as perfectly flat sheets and every one of them ends at a hard tonal
+ * step. Leaning the two edge normals in opposite directions along z costs
+ * nothing — no extra vertices, the normals were being written anyway — and makes
+ * each panel shade like a shallow half-cylinder: brightest down its spine,
+ * falling off to its edges, which is how a membrane under tension actually
+ * catches light and is what stops the row reading as a line of hard tiles.
+ *
+ * The same trick is on the flukes, for the same reason.
+ *
+ * Above about 0.7 the edges turn dark enough to draw an outline of their own and
+ * the panel reads as a tube rather than a sheet.
+ */
+const VANE_CAMBER = 0.45;
+
+/**
  * How far open the panels are held while cruising, as a fraction of fully open.
  *
  * Not zero: flat-folded panels contribute nothing to the outline and the flank
@@ -387,6 +433,90 @@ const RIM_COLOR = FLESH.rim;
 const RIM_STRENGTH = 0.55;
 const RIM_POWER = 3.0;
 
+// --- the environment response ----------------------------------------------
+//
+// `RIM_*` above is an ABSOLUTE amount of light, and that is the whole reason it
+// only works against a dark sky. Measured against lit cloud at 500 m, broadside,
+// with the key behind the animal — which is the common case, because the thing
+// that makes cloud bright is a luminary behind it — the body's own pixels ran:
+//
+//   min 0.8   p10 1.2   MEDIAN 1.9   p90 20.5   max 163.7      (out of 255)
+//
+// against a background of 96.7. Half the animal was below 2/255 and eighty per
+// cent of it lay inside a 19-level band. That is not "dark", it is *one value*:
+// a 240 m creature with a correct silhouette and no interior at all, which is
+// exactly the flat cut-out the adversarial pass reported. `RIM_*` cannot reach
+// it — 0x1c2a33 at 0.55 is about 0.012 linear, and the cloud it has to be seen
+// against is 0.095, so the rim is eight times too faint to be an edge there.
+//
+// The missing physics is that a body in a bright cloudscape is lit by the *sky*,
+// not only by the key: an enormous dim area source that fills the shadow side
+// and puts a grazing sheen on a wet flank. Three's scene lighting cannot supply
+// it — main.js's HemisphereLight is a night-sky ambient that knows nothing about
+// the weather — so it is added here, and it is added PROPORTIONALLY TO WHAT IS
+// ACTUALLY IN THE SKY. That proportionality is the load-bearing part:
+//
+//   * against bright cloud the terms scale up and the animal gains an interior,
+//   * against a dark sky they scale down to nothing and the animal stays black,
+//   * and because they are a fraction of the sky's own radiance they can never
+//     make the body brighter than the sky. It reflects; it does not glow. §10.1's
+//     blind animal still emits nothing, and none of this is on the photic channel.
+//
+// If you ever raise these past about a tenth, that last guarantee goes and the
+// Listener starts to read as lit from inside, which is the one thing it may not
+// be.
+
+/**
+ * The luminary-sum luminance that counts as a full, bright sky.
+ *
+ * Measured over a whole cycle of `clouds.sky`: Σ(colour x intensity) has a
+ * luminance of 0.36 at the darkest (t=750) and 2.58 at the brightest (t=1200).
+ * 2.5 is the bright end, so `env` is ~1 under a blazing sky and ~0.14 at night —
+ * the animal's interior appears and disappears with the weather, unarranged.
+ */
+const ENV_REF = 2.5;
+/**
+ * Floor under `env`.
+ *
+ * Not zero. At the very bottom of the cycle there is still a sky, and an animal
+ * whose interior could reach *identically* nothing would flicker out of
+ * existence at one moment in the day for no reason the player could name.
+ */
+const ENV_FLOOR = 0.10;
+
+/**
+ * Hemispheric fill: how much of the sky's radiance an upward-facing surface
+ * takes, before the grazing term.
+ *
+ * This is what puts *up* on the animal. Weighted by the world-space Y of the
+ * shaded normal, so the back is lighter than the belly by a few levels at the
+ * darkest part of the body — which is the cue that says "this is a rounded thing
+ * with a top", and the reason the silhouette stops reading as a decal. Measured:
+ * at 0.011 the back sits near 12/255 and the belly near 3/255 under a bright sky.
+ *
+ * Much higher and the whole animal lifts uniformly, which is the framework
+ * `emissive` mistake this file already rejected once — a flat fill flattens.
+ */
+const SKY_FILL = 0.020;
+
+/**
+ * The grazing sheen: strength, and the falloff exponent.
+ *
+ * Deliberately a *wide* lobe where `RIM_POWER` is a narrow one, and they are
+ * doing different jobs. The narrow one draws an edge. This one is the curvature:
+ * at an exponent of 2.2 it is still 32% of full where the surface is 60 degrees
+ * off the eye, so it spreads across the whole flank and the body reads darkest
+ * facing you and lifting toward its own outline. That gradient IS the internal
+ * information; a hard edge alone would still leave the middle flat.
+ *
+ * 0.048 puts the outline near 55/255 under lit cloud measured at 96/255 — a
+ * legible edge that stays clearly darker than the sky behind it. Above about
+ * 0.09 the flank starts to out-run the cloud at grazing angles and the animal
+ * acquires a bright outline, which reads as rendered rather than as wet.
+ */
+const SHEEN_STRENGTH = 0.050;
+const SHEEN_POWER = 2.0;
+
 /**
  * Hull albedo, lifted from FLESH.hull (0x0b0d10).
  *
@@ -446,6 +576,12 @@ const FAR_UNIFORM_EVERY = 6;
 
 const FLEX_PARS = /* glsl */`
 attribute vec4 aFlesh;
+// World-space Y of the shaded normal, carried to the fragment stage so the sky
+// fill knows which way is up. It is computed here rather than derived from the
+// fragment stage's view-space normal, because recovering a world direction there
+// means inverting the view matrix per pixel — and because the flex has already
+// moved this normal by the time three builds its own transformed one.
+varying float vUpDot;
 uniform vec2  uFlexAmp;    // (lateral, vertical) metres at the tail
 uniform float uFlexK;      // radians per metre along the body
 uniform float uFlexPhase;
@@ -728,8 +864,17 @@ function buildAppendages(L) {
           // Swept back along the body as it goes out — a panel square to the
           // body reads as a fin, and these are not for swimming.
           const zc = z - span * f * 0.22;
-          pos.push(ox, oy, zc - chord * 0.5); nrm.push(ox, oy, 0); fle.push(hx, hy, openAngle, 0);
-          pos.push(ox, oy, zc + chord * 0.5); nrm.push(ox, oy, 0); fle.push(hx, hy, openAngle, 0);
+          // The membrane normal: the hull's outward direction here, tilted
+          // toward the free edge as the span runs out. See VANE_TILT.
+          const rx = p.x / rp, ry = p.y / rp;
+          const sgn = side * foldDir;
+          const tx = -ry * sgn, ty = rx * sgn;      // tangential, in the fold direction
+          const k = VANE_TILT * f;
+          const nx = rx + tx * k, ny = ry + ty * k;
+          const nl = Math.hypot(nx, ny) * Math.sqrt(1 + VANE_CAMBER * VANE_CAMBER) || 1;
+          const vnx = nx / nl, vny = ny / nl, vnz = VANE_CAMBER / Math.sqrt(1 + VANE_CAMBER * VANE_CAMBER);
+          pos.push(ox, oy, zc - chord * 0.5); nrm.push(vnx, vny, -vnz); fle.push(hx, hy, openAngle, 0);
+          pos.push(ox, oy, zc + chord * 0.5); nrm.push(vnx, vny, vnz); fle.push(hx, hy, openAngle, 0);
         }
         for (let s = 0; s < SPAN_SEGS; s++) {
           const a = base + s * 2;
@@ -753,8 +898,11 @@ function buildAppendages(L) {
       const z = -half + u * L;
       surfacePoint(u, 0, maxR, p);
       const h = L * 0.030 * Math.sin(Math.PI * Math.pow(t, 0.8));
-      pos.push(0, p.y - 0.5, z); nrm.push(0, 0, 1); fle.push(0, 0, 0, 0);
-      pos.push(0, p.y + h, z);   nrm.push(0, 0, 1); fle.push(0, 0, 0, 0);
+      // A vertical plate on the midline, so its face points across the body.
+      // This used to push +Z, which is along the plate rather than across it,
+      // and was only ever right because computeVertexNormals overwrote it.
+      pos.push(0, p.y - 0.5, z); nrm.push(1, 0, 0); fle.push(0, 0, 0, 0);
+      pos.push(0, p.y + h, z);   nrm.push(1, 0, 0); fle.push(0, 0, 0, 0);
     }
     for (let s = 0; s < SEGS; s++) {
       const a = base + s * 2;
@@ -783,8 +931,13 @@ function buildAppendages(L) {
         const y = L * 0.012 * f * f;
         const zc = zRoot - L * FLUKE_SWEEP_FRAC * f;
         const chord = chordRoot * (1 - 0.78 * f);
-        pos.push(x, y, zc - chord * 0.55); nrm.push(0, 1, 0); fle.push(0, 0, 0, 0);
-        pos.push(x, y, zc + chord * 0.45); nrm.push(0, 1, 0); fle.push(0, 0, 0, 0);
+        // Cambered along the chord like the vanes — a fluke with one flat normal
+        // is a triangle of card, and it is the largest single flat area on the
+        // animal, so it is where that reads worst.
+        const fz = VANE_CAMBER / Math.sqrt(1 + VANE_CAMBER * VANE_CAMBER);
+        const fy = 1 / Math.sqrt(1 + VANE_CAMBER * VANE_CAMBER);
+        pos.push(x, y, zc - chord * 0.55); nrm.push(0, fy, -fz); fle.push(0, 0, 0, 0);
+        pos.push(x, y, zc + chord * 0.45); nrm.push(0, fy, fz); fle.push(0, 0, 0, 0);
       }
       for (let s = 0; s < SEGS; s++) {
         const a = base + s * 2;
@@ -798,7 +951,10 @@ function buildAppendages(L) {
   g.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
   g.setAttribute('aFlesh', new THREE.Float32BufferAttribute(fle, 4));
   g.setIndex(idx);
-  g.computeVertexNormals();
+  // No computeVertexNormals here, deliberately. Every normal above is authored,
+  // because the appendages are flat quads and the *computed* answer for a flat
+  // quad is a single constant normal — which is what turned twenty-four soft
+  // membranes into twenty-four pale rectangles. See VANE_TILT.
   return g;
 }
 
@@ -819,6 +975,8 @@ export class ListenerView extends CreatureView {
       uRimColor: { value: new THREE.Color(RIM_COLOR) },
       uRimStrength: { value: RIM_STRENGTH },
       uRimPower: { value: RIM_POWER },
+      // Sky radiance, normalised by ENV_REF. Written once per frame in step().
+      uEnv: { value: new THREE.Vector3(ENV_FLOOR, ENV_FLOOR, ENV_FLOOR) },
       uFlexAmp: { value: new THREE.Vector2(0, 0) },
       uFlexK: { value: 0 },
       uFlexPhase: { value: 0 },
@@ -847,8 +1005,9 @@ export class ListenerView extends CreatureView {
         Object.assign(shader.uniforms, this._uniforms);
         shader.vertexShader = shader.vertexShader
           .replace('#include <common>', `#include <common>\n${FLEX_PARS}`)
-          .replace('#include <beginnormal_vertex>',
-            '#include <beginnormal_vertex>\nobjectNormal = vwDeformNormal(objectNormal, position, aFlesh);')
+          .replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>
+objectNormal = vwDeformNormal(objectNormal, position, aFlesh);
+vUpDot = normalize(mat3(modelMatrix) * objectNormal).y;`)
           .replace('#include <begin_vertex>',
             '#include <begin_vertex>\ntransformed = vwDeform(transformed, aFlesh);');
         // `normal` and `vViewPosition` are both live by the time
@@ -857,11 +1016,30 @@ export class ListenerView extends CreatureView {
         // silhouette on the banded flank.
         shader.fragmentShader = shader.fragmentShader
           .replace('#include <common>', `#include <common>
-uniform vec3 uRimColor; uniform float uRimStrength; uniform float uRimPower;`)
+uniform vec3 uRimColor; uniform float uRimStrength; uniform float uRimPower;
+uniform vec3 uEnv;
+varying float vUpDot;`)
           .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
 {
   float f = 1.0 - abs(dot(normalize(normal), normalize(vViewPosition)));
+  // The absolute rim. Survives when there is no sky worth reflecting — this is
+  // the term that keeps a night silhouette from being identically the sky.
   totalEmissiveRadiance += uRimColor * (pow(f, uRimPower) * uRimStrength);
+  // The sky, reflected. Both terms are a fraction of uEnv and nothing else, so
+  // they follow the weather and can never exceed it.
+  //
+  // The dome is not 0..1: a surface facing straight down still sees the lower
+  // half of a scattering sky, and a hard zero there put a black seam along the
+  // belly where the fill switched off against the diffuse that was still lit.
+  // The appendages are drawn double-sided, and three flips their shading normal
+  // for back faces — but a varying cannot flip itself, so the same flip has to
+  // be applied here by hand. Without it the UNDERSIDE of a fluke reports that it
+  // faces the sky and lights up: the tail came out as a solid pale triangle seen
+  // from below, which is a piece of card, not an animal.
+  float up = vUpDot * (gl_FrontFacing ? 1.0 : -1.0);
+  float dome = 0.26 + 0.74 * (0.5 + 0.5 * up);
+  totalEmissiveRadiance += uEnv * (${SKY_FILL.toFixed(4)} * dome
+    + ${SHEEN_STRENGTH.toFixed(4)} * pow(f, ${SHEEN_POWER.toFixed(2)}));
 }`);
       };
       // Every Listener runs the identical program and differs only in uniforms.
@@ -903,6 +1081,38 @@ uniform vec3 uRimColor; uniform float uRimStrength; uniform float uRimPower;`)
   }
 
   /**
+   * How much sky there is to reflect, this frame.
+   *
+   * The sum of the luminaries rather than the dominant one, because two
+   * luminaries up at once is a brighter world than either alone and the shadow
+   * side of the animal is filled by both. Normalised by ENV_REF so the shader's
+   * constants are dimensionless fractions of "a bright sky", which is what lets
+   * them be reasoned about at all.
+   *
+   * Colour is carried through unnormalised, so the sheen on the flank is copper
+   * under the ember and green-cyan under the veil with nothing here choosing —
+   * the same rule the rest of the roster follows, but now applied to the one
+   * body that has no light of its own to be tinted.
+   */
+  _syncEnv(ctx) {
+    const sky = ctx && ctx.clouds && ctx.clouds.sky;
+    const e = this._uniforms.uEnv.value;
+    if (!sky || !sky.lights) { e.setScalar(ENV_FLOOR); return; }
+    let r = 0, g = 0, b = 0;
+    for (const L of sky.lights) {
+      r += L.color.x * L.intensity;
+      g += L.color.y * L.intensity;
+      b += L.color.z * L.intensity;
+    }
+    e.set(r / ENV_REF, g / ENV_REF, b / ENV_REF);
+    // The floor is on the whole vector rather than per channel, so a sky that is
+    // strongly one hue does not have the other two channels lifted to grey
+    // underneath it — which would wash the tint straight back out.
+    const lum = 0.2126 * e.x + 0.7152 * e.y + 0.0722 * e.z;
+    if (lum < ENV_FLOOR) e.multiplyScalar(ENV_FLOOR / Math.max(lum, 1e-4));
+  }
+
+  /**
    * @param {number} dt
    * @param {number} d distance to camera
    * @param {object} ctx
@@ -934,6 +1144,8 @@ uniform vec3 uRimColor; uniform float uRimStrength; uniform float uRimPower;`)
     dt = this._skipped;
     this._skipped = 0;
     this._t += dt;
+
+    this._syncEnv(ctx);
 
     // --- the envelopes -------------------------------------------------------
     //
@@ -1016,6 +1228,13 @@ export const LISTENER_BODY = {
   RIM_INTENSITY,
   RIM_STRENGTH,
   RIM_POWER,
+  ENV_REF,
+  ENV_FLOOR,
+  SKY_FILL,
+  SHEEN_STRENGTH,
+  SHEEN_POWER,
+  VANE_TILT,
+  VANE_CAMBER,
   HULL_COLOR,
   HULL_ROUGHNESS,
   BAND_COUNT,

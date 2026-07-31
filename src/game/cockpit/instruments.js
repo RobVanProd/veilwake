@@ -42,7 +42,25 @@ export const GAUGE = {
   STALL: 5,
   LAMPS: 6,
   BOOST: 7,
+  // --- the signature cluster ---------------------------------------------
+  // The six channels from signature.js, in CHANNELS order, so that the panel
+  // and the model cannot drift out of step: cockpit.js writes these by walking
+  // CHANNELS itself rather than by naming them here.
+  SIG_ACOUSTIC: 8,
+  SIG_THERMAL: 9,
+  SIG_PHOTIC: 10,
+  SIG_EM: 11,
+  SIG_WAKE: 12,
+  SIG_RELSPEED: 13,
+  /** Total exposure — the one number, per signature.js exposure(). */
+  EXPOSURE: 14,
+  /** The worst single channel. This is the warning light. */
+  ALERT: 15,
 };
+
+/** Where the six channel columns start. Must stay contiguous and in CHANNELS
+ *  order; cockpit.js writes `SIG_BASE + i` as it walks CHANNELS. */
+export const SIG_BASE = GAUGE.SIG_ACOUSTIC;
 
 /** A lamp's `frac` is negative: the shader reads its gauge as brightness. */
 const LAMP = -1;
@@ -70,6 +88,28 @@ const COL = {
   boost: [1.00, 0.36, 0.09],
   lamps: [0.36, 0.42, 0.52],
   etch: [0.68, 0.44, 0.22],
+
+  /**
+   * The signature cluster: one colour for all six channels.
+   *
+   * Giving each channel its own hue is the obvious build and it is wrong. Six
+   * differently coloured bars read as six unrelated instruments, and the thing
+   * the player has to learn is that these are six faces of one quantity — the
+   * shape of the whole cluster is the reading, not any single bar. A real engine
+   * stack does the same thing with six identical EGT columns for the same
+   * reason. Identity is carried by position, which is free and never ambiguous.
+   *
+   * Dimmer than the flight instruments on purpose. This is the readout the
+   * player will end up staring at, and the palette pass spent its whole budget
+   * getting brightness out of the frame; a cluster that competes with the window
+   * would put it straight back.
+   */
+  sig: [0.74, 0.44, 0.17],
+  /** Total exposure. Hotter than the channels, because it is the summary. */
+  exposure: [1.00, 0.56, 0.14],
+  /** The warning light. The only pure red in the cockpit besides the stall lamp,
+   *  and it is off almost all of the time — which is what makes it mean anything. */
+  alert: [1.00, 0.16, 0.04],
 };
 
 /** Lifted off the panel so it cannot z-fight, along the face normal. */
@@ -110,6 +150,26 @@ function bar(e, face, u0, u1, s0, s1, n, color, gauge, dir = 1) {
   }
 }
 
+/**
+ * A segmented column, filling upward — up the panel, away from the pilot.
+ *
+ * `sTop` is the far end, `sBot` the near one, and the fill runs from `sBot`
+ * toward `sTop` as the value rises, which is the direction every stacked meter
+ * has run since gauges were mechanical. Building it the other way is a
+ * surprisingly easy mistake to make from the `s` parameterisation alone, where
+ * larger is nearer, and it produces a cluster that empties as the ship gets
+ * louder.
+ */
+function column(e, face, u0, u1, sTop, sBot, n, color, gauge) {
+  const h = (sBot - sTop) / n;
+  const gap = h * 0.22;
+  for (let k = 0; k < n; k++) {
+    const b = sBot - h * k - gap * 0.5;
+    const a = b - h + gap;
+    facePatch(e, face, u0, u1, a, b, color, gauge, (k + 0.5) / n);
+  }
+}
+
 export function buildInstruments() {
   const e = new Emis();
   const p = LAYOUT.pod;
@@ -129,6 +189,11 @@ export function buildInstruments() {
     // Commanded throttle, under it, shorter, so the gap between what was asked
     // for and what the ship is doing is a length difference and not a number.
     bar(e, F, F.u0, F.u0 + (F.u1 - F.u0) * 0.62, 0.33, 0.425, 9, COL.throttle, GAUGE.THROTTLE);
+    // Stall, at the outboard end of the throttle row. It moved here from the
+    // centre well when the well became the signature cluster, and it belongs
+    // here anyway: stall is a fact about the wing, and this is the wing's pod.
+    facePatch(e, F, F.u0 + (F.u1 - F.u0) * 0.72, F.u1, 0.33, 0.425,
+      COL.stall, GAUGE.STALL, LAMP);
     // Etched scale marks. Always lit, very dim: the panel has to have a shape in
     // total darkness or the cockpit disappears the moment the sun is behind.
     for (let k = 0; k <= 4; k++) {
@@ -147,17 +212,61 @@ export function buildInstruments() {
     // Exterior lights: a lamp, not a bar. It is on or it is not, and when it is
     // on the ship is broadcasting.
     facePatch(e, F, F.u0, F.u0 + 0.10, 0.33, 0.425, COL.lamps, GAUGE.LAMPS, LAMP);
+    // Boost, beside it. Both of these are things the player switched on, and
+    // both are expensive on the signature — so they sit together, next to the
+    // energy bar they are spending.
+    facePatch(e, F, F.u0 + 0.12, F.u0 + 0.22, 0.33, 0.425, COL.boost, GAUGE.BOOST, LAMP);
     // What the medium is doing to the hull.
     bar(e, F, F.u0, F.u1, 0.50, 0.565, 6, COL.turb, GAUGE.TURBULENCE);
     facePatch(e, F, F.u0, F.u1, 0.62, 0.638, COL.etch, ETCH, 0);
   }
 
-  // --- the well: two lamps, centred, low ----------------------------------
+  // --- the well: the signature cluster ------------------------------------
+  //
+  // Six columns, one per channel, in CHANNELS order left to right: acoustic,
+  // thermal, photic, em, wake, relSpeed. Under them, total exposure as a wide
+  // bar, and under that the warning light.
+  //
+  // This is the most important instrument in the ship and it is in the least
+  // valuable piece of panel, which is the correct trade rather than a
+  // compromise. The well sits below the deck line, so it is under the horizon
+  // and in front of nothing; the player can read the whole cluster's *shape*
+  // with a glance that never leaves the window, and reading a shape is what this
+  // readout is for. Putting it at eye level would make it a HUD, and GAME_VISION
+  // §1 is explicit that these instruments are not a HUD.
+  //
+  // Nothing here names a creature or reports being hunted — Pillar 3 says the
+  // world does that. All this panel says is how loud the ship currently is,
+  // which is a fact about the machine and the one the player is steering by.
   {
     const w = LAYOUT.well;
     const F = { fwdY: w.topY, fwdZ: w.fwdZ, aftY: w.topY * 0.35, aftZ: w.aftZ };
-    facePatch(e, F, -0.095, -0.022, 0.20, 0.46, COL.stall, GAUGE.STALL, LAMP);
-    facePatch(e, F, 0.022, 0.095, 0.20, 0.46, COL.boost, GAUGE.BOOST, LAMP);
+    const u0 = -w.halfWidth + 0.018, u1 = w.halfWidth - 0.018;
+    const pitch = (u1 - u0) / 6;
+
+    for (let i = 0; i < 6; i++) {
+      const a = u0 + pitch * i + pitch * 0.16;
+      const b = u0 + pitch * (i + 1) - pitch * 0.16;
+      // Eight segments. Enough that the cluster has a readable silhouette,
+      // few enough that no one is ever tempted to count them.
+      column(e, F, a, b, 0.10, 0.545, 8, COL.sig, SIG_BASE + i);
+    }
+
+    // Total exposure, across the full width under the columns.
+    bar(e, F, u0, u1, 0.60, 0.665, 12, COL.exposure, GAUGE.EXPOSURE);
+
+    // The warning light: the worst single channel, not the average. A ship can
+    // be quiet on five channels and still be lit up like a flare on the sixth,
+    // and the average would hide exactly that.
+    facePatch(e, F, u0 + pitch * 1.5, u1 - pitch * 1.5, 0.705, 0.755,
+      COL.alert, GAUGE.ALERT, LAMP);
+
+    // Etched division marks between the channel columns, always faintly lit, so
+    // the cluster still has a shape when every channel reads zero.
+    for (let i = 1; i < 6; i++) {
+      const u = u0 + pitch * i;
+      facePatch(e, F, u - 0.0025, u + 0.0025, 0.10, 0.545, COL.etch, ETCH, 0);
+    }
   }
 
   return e;

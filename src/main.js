@@ -23,6 +23,10 @@ import { ShipSystems } from './game/systems.js';
 import { CreatureManager, Listener, createMedium, createSignatureView } from './game/creatures/index.js';
 import { Director, OUTCOME } from './game/director.js';
 import { Captions } from './ui/caption.js';
+import { AudioEngine } from './audio/engine.js';
+import { createAudio } from './audio/soundtrack.js';
+import { Menus } from './ui/menu.js';
+import { Hud } from './ui/hud.js';
 import { CreatureRenderer } from './render/creatures.js';
 import { ListenerView } from './render/bodies/listener.view.js';
 import { LanternView } from './render/bodies/lantern.view.js';
@@ -68,7 +72,14 @@ const scene = new THREE.Scene();
 // No scene fog: the cloud composite applies its own aerial perspective to
 // geometry, and the two stack into a grey wash.
 
-const camera = new THREE.PerspectiveCamera(62, 1, 0.5, 12000);
+// The far plane matches the cloud march's reach.
+//
+// It was 12000 while clouds.js marches to uMaxDist = 24000, so a ray still
+// inside the cloud layer at the far plane could not be given a depth and the
+// composite had to guess. Two agents independently traced artefacts back to it —
+// solid geometry meant to sit behind a cloud column was being resolved against a
+// horizon that stopped half way through the field.
+const camera = new THREE.PerspectiveCamera(62, 1, 0.5, 24000);
 camera.position.set(0, 0, 0);
 
 const rng = new Rng(seedFrom('veilwake:phase0'));
@@ -110,6 +121,22 @@ scene.add(cockpit.object3D);
 // lying to the player about the thing they are trying to manage.
 const systems = new ShipSystems({ lights: clouds.lights });
 const signature = new Signature();
+
+// The instrument cluster reads the live signature. Assigned rather than passed
+// because the cockpit is constructed above the Signature and reordering the two
+// buys nothing — `Cockpit.signature` is a public field read behind a guard.
+// Without this the centre of the panel is a dark unlit grid: the one instrument
+// that makes the whole console mean something, sitting dead.
+cockpit.signature = signature;
+
+// Sound. Until this line the game was silent — 46 authored tracks, a director
+// that picks eight-second windows by threat model, creature voice synthesis, and
+// nothing importing any of it.
+const audioEngine = new AudioEngine();
+const audio = createAudio(audioEngine);
+audio.load();                      // fire and forget: index JSON only, no audio decoded
+// Allocated once; the fields are read live each frame.
+const audioRefs = { ship: null, systems, creatures: null, clouds };
 
 // Where the ship was, keyed by how long ago.
 //
@@ -390,6 +417,13 @@ function update(dt) {
   // advance on the same step the player earned it rather than one behind.
   director.update(dt, loop.simTime);
   captions.update(dt);
+
+  // Audio last, after the creatures and the director, so the score is scored
+  // against THIS frame's attention rather than last frame's. simTime rather than
+  // wall clock, so a headless seek advances the music with everything else.
+  audioRefs.ship = ship;
+  audioRefs.creatures = creatures;
+  audio.frame(dt, loop.simTime, audioRefs);
   if (director.outcome !== OUTCOME.RUNNING && !endingShown) {
     endingShown = true;
     captions.showEnding(director.outcome, { attempts: director.attempts });
@@ -472,6 +506,19 @@ function render() {
 
 const loop = new Loop({ hz: 120, update, render });
 
+// The interface: title, pause, options, and the end of a run.
+//
+// Constructed after `loop` because both take it — the HUD freezes its reveal
+// timer while paused and Menus owns loop.paused. Until this line the game booted
+// straight into flight with no way out of it, and the seven comfort options in
+// camera.js were all implemented and all unreachable.
+const hud = new Hud({ controls, loop });
+const menus = new Menus({
+  loop, pad, input, shipCam, controls, hud,
+  onRestart: () => { endingShown = false; captions.hideEnding(); director.restart(); },
+  onAudio: (bus, value) => audioEngine.setVolume(bus, value),
+});
+
 // ---------------------------------------------------------------------------
 // Diagnostics
 // ---------------------------------------------------------------------------
@@ -501,6 +548,7 @@ globalThis.GAME = {
   /** The light registry, so a capture can inspect what was actually lit. */
   lights: clouds.lights,
   cockpit, systems, signature, creatures, director, captions, views,
+  audio, audioEngine, hud, menus,
   /** Where the ship was `ageSec` ago — the sound source, not the ship. */
   shipPositionAt,
   stats: () => loop.perf.stats(),

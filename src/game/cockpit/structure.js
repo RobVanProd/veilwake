@@ -20,7 +20,7 @@
 // horizon.
 
 import { Surf } from './builder.js';
-import { LAYOUT, EYE, section, zAt, wallAt, deckAt } from './layout.js';
+import { LAYOUT, EYE, section, outerSection, zAt, wallAt, roofAt, deckAt } from './layout.js';
 
 /**
  * Albedos, linear.
@@ -73,6 +73,22 @@ const C = {
   lip:   [0.032, 0.037, 0.047],   // the mouth: read as silhouette, not as surface
   pod:   [0.042, 0.046, 0.054],
   tail:  [0.020, 0.023, 0.030],
+  /**
+   * The backing shell.
+   *
+   * Darker than anything else in here, and that is a decision rather than an
+   * oversight. This surface is only ever seen through a gap the near plane has
+   * just cut in the surface in front of it — a sliver a few pixels wide at the
+   * edge of the frame. If it were painted the same value as the hull it would
+   * read as a lit edge appearing out of nowhere as the ship manoeuvres, which is
+   * a worse artefact than the hole it is replacing. Near black, it reads as more
+   * hull, which is what it is.
+   */
+  back:  [0.014, 0.016, 0.021],
+  /** Fastener heads: the one place bare metal is allowed to show. */
+  bolt:  [0.086, 0.091, 0.101],
+  /** Cable looms. Rubberised, so darker than the frame and with no sheen. */
+  cable: [0.028, 0.030, 0.035],
 };
 
 /**
@@ -104,6 +120,39 @@ export function buildStructure() {
     s.ring(section(dA), zAt(dA), section(dB), zAt(dB), shellColor, 1, 0.03);
   }
 
+  // --- the backing shell ---------------------------------------------------
+  //
+  // The seal. See LAYOUT.hullThickness for the measurement that sets its size;
+  // what matters here is the winding, which is the part that is easy to get
+  // wrong and impossible to see in a wireframe.
+  //
+  // It is wound *inward*, exactly like the surface it backs — not outward as a
+  // real hull's outer skin would be. That is deliberate. An outward-wound skin
+  // is back-facing from inside the cockpit, so FrontSide culls it and it seals
+  // nothing; the one and only job of this surface is to be visible from the
+  // pilot's seat in the sliver where the near plane has removed the inner
+  // surface, and for that it has to face the pilot. It is a backing, not a hull.
+  //
+  // Depth does the rest: it is farther away than the surface it backs in every
+  // direction, so whenever that surface survives the near plane it occludes this
+  // one completely and this costs nothing but the fill it never wins.
+  for (let i = 0; i < S.length - 1; i++) {
+    const dA = S[i], dB = S[i + 1];
+    s.ring(outerSection(dA), zAt(dA), outerSection(dB), zAt(dB), C.back, 1, 0);
+  }
+
+  // Close the sandwich at both ends, so there is no ray that can enter the gap
+  // between the two shells from behind and come out the other side. Neither of
+  // these is ever visible in a normal frame; they exist so that "watertight" is
+  // a property of the mesh rather than a claim about which way people look.
+  {
+    const dT = S[0], dM = LAYOUT.mouth;
+    // Aft: an annulus from the backing shell in to the inner tail cap.
+    s.annulus(outerSection(dT), section(dT), zAt(dT), -1, C.back, 1, 0);
+    // Forward: the mouth rim, the visible thickness of the canopy frame.
+    s.annulus(outerSection(dM), section(dM), zAt(dM), +1, C.back, 1, 0.10);
+  }
+
   // --- the mouth lip -------------------------------------------------------
   // Flares outward rather than inward. A lip that turns in is the obvious build
   // and it is wrong twice: it becomes the narrowest cross-section, so it and not
@@ -125,6 +174,80 @@ export function buildStructure() {
     s.annulus(section(dA), section(dA, r.depth), zAt(dA), +1, C.frame, 1, 0.24);
     s.ring(section(dA, r.depth), zAt(dA), section(dF, r.depth), zAt(dF), C.frame, 1, 0.30);
     s.annulus(section(dF), section(dF, r.depth), zAt(dF), -1, C.frame, 1, 0.24);
+  }
+
+  // --- fasteners -----------------------------------------------------------
+  //
+  // Two per facet on each rib's aft face — the face turned back toward the
+  // pilot, which is the one the panel glow actually reaches and therefore the
+  // only one where a small bright mark will ever be seen.
+  //
+  // They are lifted off the face along +z rather than modelled proud of it. A
+  // modelled head is twelve triangles to produce a silhouette that is under a
+  // pixel across at this distance; a lifted quad with the frame's sheen turned
+  // up is two triangles and is indistinguishable in every capture taken of it.
+  // The lift has to be there — coplanar with the annulus it z-fights, and a
+  // z-fighting bolt flickers, which draws far more attention than the bolt is
+  // worth.
+  {
+    const F = LAYOUT.fastener;
+    for (const r of LAYOUT.ribs) {
+      const dA = r.d - r.halfWidth;
+      const z = zAt(dA) + F.lift;
+      const outer = section(dA), inner = section(dA, r.depth);
+      for (let i = 0; i < 8; i++) {
+        const j = (i + 1) & 7;
+        for (const t of [0.28, 0.72]) {
+          // Midway across the annulus, so the head sits on metal rather than
+          // hanging over either edge of it.
+          const ox = outer[i][0] + (outer[j][0] - outer[i][0]) * t;
+          const oy = outer[i][1] + (outer[j][1] - outer[i][1]) * t;
+          const ix = inner[i][0] + (inner[j][0] - inner[i][0]) * t;
+          const iy = inner[i][1] + (inner[j][1] - inner[i][1]) * t;
+          const cx = ox + (ix - ox) * 0.5, cy = oy + (iy - oy) * 0.5;
+          const h = F.size * 0.5;
+          s.quad([cx - h, cy - h, z], [cx + h, cy - h, z],
+                 [cx + h, cy + h, z], [cx - h, cy + h, z], C.bolt, 1, 0.85);
+        }
+      }
+    }
+  }
+
+  // --- cable runs ----------------------------------------------------------
+  //
+  // Along the two upper chamfer seams, from behind the pilot out to the mouth.
+  // Built as a square section rather than a round one: four sides give four
+  // distinct normals, so the loom picks up the sweeping canopy light along its
+  // length the same way the shell does, and a round tube of this diameter would
+  // need eight sides to do it and would still read as square at four pixels.
+  {
+    const K = LAYOUT.conduit;
+    const ey = EYE[1];
+    // Section indices 1 and 2 are the two upper roof-to-chamfer seams — the
+    // structural corners, which is where a real loom is routed because it is the
+    // only place with room behind the trim.
+    for (const idx of [1, 2]) {
+      const at = (d) => {
+        const p = section(d)[idx];
+        // Push in toward the tube's axis so the loom stands proud of the seam
+        // instead of being buried in it.
+        const vx = 0 - p[0], vy = ey - p[1];
+        const len = Math.hypot(vx, vy) || 1;
+        return [p[0] + (vx / len) * K.offset, p[1] + (vy / len) * K.offset, zAt(d)];
+      };
+      const steps = 5;
+      for (let k = 0; k < steps; k++) {
+        const dA = K.dFrom + (K.dTo - K.dFrom) * (k / steps);
+        const dB = K.dFrom + (K.dTo - K.dFrom) * ((k + 1) / steps);
+        const a = at(dA), b = at(dB), r = K.radius;
+        s.hexa([
+          [b[0] - r, b[1] - r, b[2]], [b[0] + r, b[1] - r, b[2]],
+          [b[0] + r, b[1] + r, b[2]], [b[0] - r, b[1] + r, b[2]],
+          [a[0] - r, a[1] - r, a[2]], [a[0] + r, a[1] - r, a[2]],
+          [a[0] + r, a[1] + r, a[2]], [a[0] - r, a[1] + r, a[2]],
+        ], C.cable, 1, 0.06);
+      }
+    }
   }
 
   // --- the tail ------------------------------------------------------------

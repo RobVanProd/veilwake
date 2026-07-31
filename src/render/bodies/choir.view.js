@@ -14,11 +14,12 @@
 // So the shoal is drawn as an *unresolvable point cloud plus the few animals
 // close enough to resolve*, which is what it physically is:
 //
-//   GRAIN     ~26 000 points at a fixed size in PIXELS, not metres, clumped into
-//             ~2200 knots so the field has schools and gaps. A shoal at any
-//             distance is a field of specks you cannot count; what changes with
-//             distance is how many land in a pixel, not how big they are. Three
-//             draw calls — one per size class — no triangles, no per-frame CPU.
+//   GRAIN     a few thousand points at a fixed size in PIXELS, not metres,
+//             clumped into knots so the field has schools and gaps, and drawn in
+//             two polarities at once — most of them near-black, a third of them
+//             lifted — so that there is no background the field can match and
+//             disappear into. One draw call per size-and-tone class, no
+//             triangles, no per-frame CPU. See `grainClasses`.
 //   ELEMENTS  0.4 m, true scale, lit, aligned into a school with a heading of
 //             its own, and only for the handful of knots close enough that a
 //             0.4 m body is more than a pixel. They grow in as you approach so a
@@ -74,9 +75,10 @@
 //
 // --- performance, measured --------------------------------------------------
 //
-// At range: **4 draw calls, 3 072 triangles, 24 287 points**. Inside a shoal
-// with six knots resolving: **6 draw calls, 16 152 triangles**. Against
-// PERFORMANCE_BUDGET §4's 120 calls and 400 000 triangles that is 5% and 4% of
+// At range: **6 draw calls, 3 072 triangles**, and a grain count that is at most
+// `grain` (4 000) and thins with the shoal's angular size. Inside a shoal with
+// six knots resolving: **8 draw calls, 16 152 triangles**. Against
+// PERFORMANCE_BUDGET §4's 120 calls and 400 000 triangles that is 7% and 4% of
 // the frame's allowance for the largest object in the game.
 //
 // `sync()` costs **0.114 ms** in its worst case — inside the shoal, six knots
@@ -88,16 +90,23 @@
 // without. **[headless, non-compositing — optimistic]**, per §3, and quoted only
 // as a regression tripwire; it is not comparable to the 11 ms render budget.
 //
-// The grain is deliberately not LODed by count: at a fixed pixel size it already
-// costs the same at every distance, and thinning it with range would show up as
-// the shoal visibly evaporating as you fly away — the one thing a 6 km animal
-// must never appear to do. What LOD switches off is the two true-scale layers,
-// which are meaningless beyond a few hundred metres.
+// The grain IS thinned with range, and this file used to argue the opposite —
+// that thinning would read as the shoal evaporating as you fly away. That
+// argument was wrong because it thought in counts instead of in coverage: the
+// points are a fixed size in pixels, so a shoal at twice the range packs the
+// same count into a quarter of the disc and gets *denser*, not thinner.
+// Measured, it went from 50% coverage at 2.6 km to 87% at 6 km, which is a solid
+// ball. Scaling the count with the square of the angular size holds the coverage
+// where it was tuned, so the shoal looks the same at every range — which is what
+// the paragraph above was actually asking for — and the count falls out of it.
+// See `grainAngleRef`. What LOD switches off is the two true-scale layers, which
+// are meaningless beyond a few hundred metres.
 //
-// One honest caveat: 24 000 points is well past PERFORMANCE_BUDGET §4's 4 000
-// "particles alive". That budget's own wording scopes it to "wake and discharge
-// only", and these are a creature's body rather than an effect — but the number
-// is large and belongs in a report rather than buried here.
+// The count is now `grain` = 4 000 at most, which is PERFORMANCE_BUDGET §4's
+// "particles alive" line exactly. The previous 24 000–34 000 was defended on the
+// grounds that the budget line is scoped to "wake and discharge only" and these
+// are a body rather than an effect. That reading is fair and it is no longer
+// needed: the coverage measurement asks for the same number the budget does.
 
 import * as THREE from 'three';
 import { CreatureView, FLESH } from '../creatures.js';
@@ -109,62 +118,118 @@ import { CHOIR, POSTURE } from '../../game/creatures/choir.js';
 
 export const CHOIR_ART = {
   /**
-   * Points in the grain field at `density01 = 1`.
+   * Points in the grain field at `density01 = 1`, at the reference angular size.
    *
    * Not a count of animals — §10.4's "tens of thousands" are 0.4 m and none of
    * them is individually visible past a few hundred metres. A point is a knot of
-   * some thousands of them, and 26 000 is set by screen coverage rather than by
-   * biology: a 3 km shoal at 2.5 km covers roughly a 2000 px disc, and 26 000
-   * specks of two to four pixels put about 5–10% of that disc in shadow. Five
-   * per cent is a wrongness; twenty is a solid ball and the shoal stops being a
-   * place you can fly into.
+   * some thousands of them, and the number is set by screen coverage rather than
+   * by biology: a shoal at its design range covers a disc of a few hundred
+   * thousand pixels, and the field has to put roughly 5–10% of that disc in
+   * shadow. Five per cent is a wrongness; twenty is a solid ball and the shoal
+   * stops being a place you can fly into.
+   *
+   * This was 26 000, and 26 000 was wrong on both counts it was justified by.
+   * **Measured**, at 1400x900, a 1300 m shoal at 2600 m: 32 794 points changed
+   * 106 515 pixels inside a projected disc of about 213 000 px². That is **50%
+   * coverage**, five to ten times what the paragraph above asks for, which is
+   * why the shoal read as a solid olive ball rather than as a region of sky that
+   * is subtly wrong. At 6 km it measured **87%** — very nearly opaque.
+   *
+   * 4 000 is PERFORMANCE_BUDGET §4's "particles alive" line, exactly, and it is
+   * also the count that produces the coverage this file always claimed: 4 000
+   * points at a mean of 5.5 px² each is about 22 000 px, or **10%** of the same
+   * disc. The budget argument and the picture argument land on the same number,
+   * so there is no longer anything to trade off and no caveat to file.
    */
-  grain: 26000,
+  grain: 4000,
 
   /**
-   * Grain size classes, in pixels at the reference height below, with the
-   * fraction of the field in each and a multiplier on its tone.
+   * Grain size classes: pixel size at the reference height below, the fraction
+   * of the field in each, and the ABSOLUTE tone it is drawn at, in linear
+   * radiance before the luminary tints it and before tone mapping.
    *
    * Specified in pixels because that is what the eye actually reads: a shoal of
    * unresolvable animals looks the same size at every range and only its
    * *density on screen* changes.
    *
-   * Three classes rather than one, and this is not decoration. A field of
+   * Several classes rather than one, and this is not decoration. A field of
    * identical two-pixel dots does not read as animals, it reads as **dirt on the
    * lens** — the first capture of this layer looked like a dead-pixel map,
    * because uniform size is the one property real specks at real distances never
-   * have. A spread of sizes, with the larger ones fractionally lighter as though
-   * catching more light, is what turns noise back into a swarm.
+   * have.
    *
    * Below about two pixels a dark speck does not survive the composite's dither
    * and the 8-bit write; above about five it stops being grain and starts being
-   * gravel. Those are the bounds the three classes sit inside.
+   * gravel. Those are the bounds the classes sit inside.
+   *
+   * --- why the tones come in two polarities ---------------------------------
+   *
+   * This used to be a single tone, 0.034 linear, chosen to sit *between* the two
+   * backgrounds the game has — darker than lit cloud, lighter than the zenith.
+   * Something that sits between two values necessarily crosses each of them
+   * somewhere, and a background it exactly matches is a background it is
+   * invisible against. That is not a hypothetical: an adversarial pass reported
+   * an on/off diff of **exactly zero changed pixels** at 2.6 km, and a sweep here
+   * across the sky (pitch 0.30 to 1.30 above the deck, one luminary phase) found
+   * the field's mean per-pixel difference bottoming out at **13.9 of 255** where
+   * the background sat near 15 — a shoal three kilometres across reduced to a
+   * faint stain. A single absolute tone cannot avoid this. It is not a tuning
+   * error, it is the shape of the idea.
+   *
+   * So the field is drawn in two populations at once:
+   *
+   *   DARK  (~0.002 linear) renders at about 1/255. It vanishes against the
+   *         zenith, which is correct — it *is* the dark — and it is a hard,
+   *         near-black speck against anything lit. This is the population that
+   *         makes the shoal a hole in a bright sky.
+   *   LIGHT (~0.05 linear) renders near 50/255: a bright fleck against the
+   *         zenith, and still a clearly *dark* fleck against lit cloud at 99.
+   *
+   * Whatever the background is, at least one of the two is far from it. The
+   * worst case is a background that matches the light population exactly, and
+   * there the dark population is still fifty levels away. There is no longer a
+   * sky this animal can hide in.
+   *
+   * It is also what a shoal looks like. A hundred thousand bodies do not all
+   * present the same face: some are edge-on and black, some catch the luminary
+   * and flash. A murmuration is not a uniform grey cloud, it is salt and pepper,
+   * and that mixture is the reason it reads as *many things* rather than as one
+   * smudged object.
    */
   grainClasses: [
-    { px: 2.0, share: 0.62, tone: 0.85 },
-    { px: 3.0, share: 0.28, tone: 1.00 },
-    { px: 4.4, share: 0.10, tone: 1.25 },
+    { px: 2.2, share: 0.36, tone: 0.0015 },
+    { px: 3.4, share: 0.16, tone: 0.0022 },
+    { px: 4.6, share: 0.10, tone: 0.0035 },
+    { px: 2.2, share: 0.26, tone: 0.042 },
+    { px: 3.4, share: 0.12, tone: 0.062 },
   ],
   /**
    * Point sizes do not scale with the render target, so the grain would get
    * finer on a bigger screen and the shoal would look further away at 4K than at
-   * 1080p. `ctx.renderer` (if the host passes one) is used to correct for that
-   * against this reference height.
+   * 1080p. The drawing-buffer height is measured against this reference.
    */
   grainRefH: 900,
 
   /**
-   * The grain's tone, before the luminary tints it.
+   * Angular radius (shoal radius / distance) at which the full grain count is
+   * drawn, and the floor the count is allowed to thin to.
    *
-   * The one number in this file that had to be found by capture rather than
-   * derived. The grain has to read against *both* backgrounds this game has: it
-   * must be darker than a lit cloud (~0.2 linear and up) and lighter than the
-   * zenith (`sky.js` puts that near 0.005). Anything near-black — the obvious
-   * choice for flesh — is invisible against half the frame, and half the frame
-   * is where the dread is. So it sits between them and reads as a *smudge*: dark
-   * where the sky is bright, faintly luminous where the sky is black.
+   * The grain is at a fixed size in PIXELS, so a shoal that halves its angular
+   * size packs the same number of specks into a quarter of the area and its
+   * coverage quadruples. Measured, that is exactly what happened: 50% coverage
+   * at 2.6 km became 87% at 6 km, so the further away the shoal was the more
+   * solid it looked — an object, at the range where §10.4 most needs it to be a
+   * region. Scaling the count with the square of the angular size holds the
+   * coverage where it was set and costs nothing but a `setDrawRange`.
+   *
+   * 0.50 is the shoal seen from two radii out, which is the range the coverage
+   * above was measured and tuned at. The floor stops it from thinning away
+   * entirely: past about eight kilometres a shoal genuinely should start to look
+   * solid, and a field that kept thinning would read as the one thing a 6 km
+   * animal must never appear to do, which is evaporate as you fly away from it.
    */
-  grainTone: 0.034,
+  grainAngleRef: 0.50,
+  grainThinFloor: 0.34,
 
   /**
    * Beyond this a knot is only grain; inside it, its elements are drawn too.
@@ -215,6 +280,21 @@ export const CHOIR_ART = {
    */
   driftCellM: 100,
   driftSlots: 12,
+  /**
+   * How many elements the shoal is taken to contain at `density01 = 1`, for the
+   * purpose of deciding how thick the drift lattice is.
+   *
+   * §10.4 says "tens of thousands", which is a range and not a number, so this
+   * is the top of it. It is a *population*, not a draw count — the lattice draws
+   * at most `driftSlots * 27` = 324 of them, being the ones within a cell or two
+   * of the camera — and it exists so that the density of what passes the canopy
+   * inside the shoal is derived from what the simulation claims is there rather
+   * than from whatever the renderer happened to be budgeted.
+   *
+   * At a 1300 m radius this works out to about ten of the twelve slots live,
+   * which is where it sat before the grain count moved.
+   */
+  driftPopulation: 90000,
 
   /** Echo ripples alive at once. §10.4's DENSE posture is one echo every 2.5 s. */
   rippleSlots: 8,
@@ -250,7 +330,8 @@ export const CHOIR_ART = {
    */
   rippleMinRad: 0.0030,
   /**
-   * How bright a turning shoal is, as a multiple of the grain's own tone.
+   * How bright a turning shoal is, as a multiple of the dominant luminary's
+   * colour after that colour has been normalised to a peak of one.
    *
    * Additive, so this is a lift and not a lamp. It has to clear the sky it is
    * drawn against — a ripple mote writes depth, so at its pixel the sky is
@@ -561,9 +642,15 @@ export class ChoirView extends CreatureView {
 
     for (let k = 0; k < K; k++) {
       const kx = this._knotPos[k * 3], ky = this._knotPos[k * 3 + 1], kz = this._knotPos[k * 3 + 2];
-      // Knots vary in size by a factor of three, so the texture has structure at
+      // Knots vary in size by a factor of four, so the texture has structure at
       // more than one scale and never falls into a regular stipple.
-      const per = Math.round(CHOIR_ART.grainPerKnot * (0.5 + rng() * 1.5));
+      //
+      // The jitter is centred on 1.0, which it was not: it read `0.5 + 1.5 x`,
+      // whose mean is 1.25, so the field always came out a quarter larger than
+      // `grain` asked for — 26 000 measured as 32 794 drawn. That did not matter
+      // while the count was a soft target and it matters now that it is a budget
+      // line, so the spread is the same shape and the mean is one.
+      const per = Math.round(CHOIR_ART.grainPerKnot * (0.4 + rng() * 1.2));
       // Loose knots read as a shoal; tight ones read as gravel thrown at the
       // lens. The spread varies for the same reason the counts do.
       const rad = spread * (0.6 + rng() * 0.9);
@@ -711,12 +798,8 @@ export class ChoirView extends CreatureView {
     // shoal that can vanish entirely can be flown through without the player
     // ever learning it was there.
     const f = 0.28 + 0.72 * d;
-    this._grainCount = 0;
-    for (const L of this.grainLayers) {
-      const n = Math.round(L.capacity * f);
-      L.geom.setDrawRange(0, n);
-      this._grainCount += n;
-    }
+    this._densityF = f;
+    this._applyGrainCount(true);
     this._activeKnots = Math.round(this._knotCount * f);
 
     this._perKnot = Math.round(CHOIR_ART.elementsPerKnot[0]
@@ -724,15 +807,61 @@ export class ChoirView extends CreatureView {
 
     // Drift count from §10.4's own element budget rather than a number picked to
     // look nice: the field you fly through has the density the shoal claims.
+    //
+    // This used to read `CHOIR_ART.grain * 3.5`, which quietly tied the density
+    // of the field you fly through to the *rendering* budget of the field you
+    // look at. They were the same number by coincidence and stopped being so the
+    // moment the grain count was set by screen coverage: dropping the grain from
+    // 26 000 to 4 000 would have emptied the inside of the shoal by a factor of
+    // six, which is the one place §10.4 most needs something to be passing.
     const R = this.R;
-    const perM3 = (CHOIR_ART.grain * 3.5 * d) / Math.max((4 / 3) * Math.PI * R * R * R, 1);
+    const perM3 = (CHOIR_ART.driftPopulation * d) / Math.max((4 / 3) * Math.PI * R * R * R, 1);
     const perCell = perM3 * Math.pow(CHOIR_ART.driftCellM, 3);
     this._driftSlots = Math.max(0, Math.min(CHOIR_ART.driftSlots, Math.round(perCell)));
+  }
+
+  /**
+   * Push `density01 x range` into the grain's draw ranges.
+   *
+   * Both factors change slowly — density on a 30 s time constant, range with the
+   * ship — so this is gated on a hundredth of a change rather than run every
+   * frame. `setDrawRange` is cheap, but it is not free and there is nothing to
+   * see for a difference of one point in four thousand.
+   *
+   * Truncation removes whole knots from the tail rather than thinning every knot
+   * into a haze, because the buffers were filled knot by knot. Fewer schools is
+   * what a thinner shoal is; the same schools with fewer animals each is not —
+   * that is a dissolve, and it is visible as one.
+   */
+  _applyGrainCount(force) {
+    const f = (this._densityF ?? 1) * (this._rangeF ?? 1);
+    if (!force && Math.abs(f - (this._grainF ?? -1)) < 0.01) return;
+    this._grainF = f;
+    this._grainCount = 0;
+    for (const L of this.grainLayers) {
+      const n = Math.round(L.capacity * f);
+      L.geom.setDrawRange(0, n);
+      this._grainCount += n;
+    }
+  }
+
+  /**
+   * How much of the field to draw for the shoal's current angular size.
+   *
+   * See `grainAngleRef`. `d` is to the centre; inside the shoal the ratio goes
+   * above one and clamps, which is right — from inside, the field is the sky.
+   */
+  _stepGrainRange(d) {
+    const ang = this.R / Math.max(d, 1);
+    const k = ang / CHOIR_ART.grainAngleRef;
+    this._rangeF = Math.max(CHOIR_ART.grainThinFloor, Math.min(1, k * k));
+    this._applyGrainCount(false);
   }
 
   step(dt, d, ctx) {
     this._t += dt;
     this._applyDensity();
+    this._stepGrainRange(d);
     this._heading = typeof this.creature.heading === 'number' ? this.creature.heading : 0;
 
     // Camera in shoal-local space. Done by hand rather than through
@@ -772,7 +901,6 @@ export class ChoirView extends CreatureView {
    */
   _tintGrain(ctx) {
     const sky = ctx && ctx.clouds && ctx.clouds.sky;
-    const T = CHOIR_ART.grainTone;
     let hr = 0.72, hg = 1, hb = 0.94;
     if (sky && sky.dominant) {
       const c = sky.dominant.color;
@@ -781,11 +909,21 @@ export class ChoirView extends CreatureView {
     }
     // Point size is in device pixels and does not scale with the render target,
     // so without this the shoal is coarse at 720p and invisibly fine at 4K.
+    //
+    // The height is taken from the cloud system's own scene buffer, which is
+    // allocated at the drawing-buffer size, rather than from `ctx.renderer`.
+    // That is not a preference: main.js calls `views.sync(..., { simTime })`, so
+    // `ctx.renderer` is undefined in the actual game and this correction had
+    // never once run outside a test harness. `ctx.renderer` is still honoured
+    // first for the harnesses that do pass one.
     const r = ctx && ctx.renderer;
-    let k = 1;
-    if (r && r.getSize) k = (r.getSize(_p).y || CHOIR_ART.grainRefH) / CHOIR_ART.grainRefH;
+    const rt = ctx && ctx.clouds && ctx.clouds.sceneRT;
+    let h = 0;
+    if (r && r.getSize) h = r.getSize(_p).y;
+    else if (rt) h = rt.height;
+    const k = (h || CHOIR_ART.grainRefH) / CHOIR_ART.grainRefH;
     for (const L of this.grainLayers) {
-      const t = T * L.cls.tone;
+      const t = L.cls.tone;
       L.mat.color.setRGB(hr * t, hg * t, hb * t);
       L.mat.size = L.cls.px * k;
     }

@@ -92,6 +92,46 @@ export const LAYOUT = {
   lip: { d: 1.36, scale: 1.10 },
 
   /**
+   * Hull thickness: how far a second, backing shell sits outside the first.
+   *
+   * This is the fix for the see-through corners, and the reason it is a
+   * *thickness* rather than a bigger octagon needs stating, because "scale the
+   * shell up until the gap closes" is the obvious wrong answer and it does not
+   * work here.
+   *
+   * The shell is a single-sided surface of zero thickness, and the camera's near
+   * plane is 0.5 m (`camera.near`, set in main.js and not ours to move). The
+   * interior comes closer than that: `deckAt(0)` is 0.380 and `roofAt(0)` is
+   * 0.400, both measured from the eye. Any facet nearer than 0.5 m is clipped
+   * away by the near plane, and because the tube is convex there is exactly one
+   * surface along any ray out of the eye — so when that one is clipped, nothing
+   * is left and the ray reaches the sky. Measured with a raycast that models the
+   * near plane: **1423 of 6000 directions on the sphere from the eye (24%) are
+   * unsealed**, and they enter an 80 degree frustum as soon as the eye displaces
+   * about 0.25 m laterally or 0.20 m vertically.
+   *
+   * That displacement is reachable. Instrumented over 30 s of hard flight with
+   * real turbulence, boost and braking, the eye travels up to 0.172 m laterally,
+   * 0.104 m vertically and 1.006 m forward of its design position, and the view
+   * rotates up to 7 degrees against the hull.
+   *
+   * A backing shell removes the whole class: whatever the near plane cuts away,
+   * there is a second opaque surface behind it. The number is then a clearance
+   * budget rather than a taste:
+   *
+   *     nearest interior (0.380) + thickness - worst eye excursion (0.18)
+   *         >= near plane (0.5) + margin
+   *
+   * At 0.38 the backing deck sits 0.760 m from the design eye and 0.580 m from
+   * the worst measured one, clearing the near plane by 0.08 m. Making it smaller
+   * eats that margin; making it larger costs nothing visually — the backing
+   * shell is outside the inner one in every direction, so it is occluded by it
+   * except in the sliver where the near plane has removed the inner one — but it
+   * is triangles, so it does not grow for free.
+   */
+  hullThickness: 0.38,
+
+  /**
    * Ring frames standing proud of the shell.
    *
    * These are what make the light do something. A bare aperture casts one soft
@@ -125,8 +165,42 @@ export const LAYOUT = {
     baseY: -0.02,
     inner: 0.135, outer: 0.615,
   },
-  /** The low centre well between the pods: two lamps and nothing else. */
-  well: { halfWidth: 0.125, topY: 0.095, fwdZ: 0.98, aftZ: 1.14, baseY: -0.02 },
+  /**
+   * The low centre well between the pods.
+   *
+   * It used to be "two lamps and nothing else", which wasted the one piece of
+   * panel that is directly under the pilot's line of sight and never in front of
+   * anything. It now carries the signature cluster — the six channels the whole
+   * game is actually played on — because that readout has to be glanceable
+   * continuously and must never be somewhere the eye has to leave the window to
+   * find. Widened from 0.125 to fit six columns at a legible pitch; still below
+   * the deck line, so nothing about the occlusion changes.
+   */
+  well: { halfWidth: 0.215, topY: 0.105, fwdZ: 0.965, aftZ: 1.15, baseY: -0.02 },
+
+  /**
+   * Fasteners on the ring frames.
+   *
+   * Two per facet per rib, on the aft face — the one the pilot sees. They are
+   * flat quads rather than modelled heads: at this distance a bolt is four
+   * pixels, and four pixels of geometry costs 12 triangles to say exactly what
+   * four pixels of a slightly brighter, much shinier quad says for two. What
+   * they are for is scale — a surface with a repeating small feature on it reads
+   * as fabricated and as a known size, and the same surface without one reads as
+   * an untextured plane at an unknown distance.
+   */
+  fastener: { size: 0.017, inset: 0.055, lift: 0.0035 },
+
+  /**
+   * Cable runs along the two upper chamfer seams.
+   *
+   * A real small aircraft routes its looms along a structural corner, because
+   * that is where there is room behind the trim. Putting them anywhere else
+   * reads as decoration; putting them here reads as the reason the corner is
+   * shaped like that. They also give the eye a line to follow from the pilot out
+   * to the mouth, which is the depth cue the interior was missing.
+   */
+  conduit: { radius: 0.024, offset: 0.030, dFrom: -0.62, dTo: 1.16 },
 
   /** Where the instrument glow is treated as coming from, for the light it
    *  throws back onto the panel. Between the two pods, just above the deck. */
@@ -172,6 +246,60 @@ export function section(d, shrink = 0, scale = 1) {
 
 /** Ship-space z for a depth d. */
 export const zAt = (d) => EYE[2] - d;
+
+/**
+ * The backing shell's cross-section at depth d.
+ *
+ * A negative shrink, which is to say the interior grown outward by the hull
+ * thickness. Derived here rather than written out at the call site so that the
+ * seal and the surface it backs cannot drift apart — the same discipline
+ * apertures() uses for the shadow.
+ */
+export function outerSection(d, scale = 1) {
+  return section(d, -LAYOUT.hullThickness, scale);
+}
+
+/**
+ * How close the shell comes to a given eye, inner surface and backing shell.
+ *
+ * This is the seal's acceptance test in one number, and it is here rather than
+ * in the test file because it is derived from the same table the geometry is.
+ * `backing` must stay above `camera.near` (0.5) for every eye the camera can
+ * reach, or the near plane will cut a hole in the cockpit. See `hullThickness`.
+ *
+ * Sampled rather than solved: the profile is quadratic and the cross-section is
+ * an octagon, so the true minimum is a piecewise thing with no closed form worth
+ * the risk of getting subtly wrong.
+ *
+ * It measures to the octagon's *edges*, not its vertices. The first version used
+ * vertices and reported the inner surface at 0.583 m when the deck facet is
+ * directly under the eye at 0.380 — the closest point on a facet is almost never
+ * a corner of it, and for a clearance an over-report is the dangerous direction
+ * to be wrong in, because it says "sealed" about a hole.
+ */
+export function clearance(eye = EYE) {
+  // Distance from (px, py) to the segment (ax, ay)-(bx, by).
+  const segDist = (px, py, ax, ay, bx, by) => {
+    const vx = bx - ax, vy = by - ay;
+    const len2 = vx * vx + vy * vy;
+    let t = len2 > 0 ? ((px - ax) * vx + (py - ay) * vy) / len2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    return Math.hypot(px - (ax + vx * t), py - (ay + vy * t));
+  };
+  let inner = Infinity, backing = Infinity;
+  for (let d = LAYOUT.sections[0]; d <= LAYOUT.mouth + 1e-6; d += 0.01) {
+    const dz = zAt(d) - eye[2];
+    const a = section(d), b = outerSection(d);
+    for (let i = 0; i < 8; i++) {
+      const j = (i + 1) & 7;
+      inner = Math.min(inner, Math.hypot(
+        segDist(eye[0], eye[1], a[i][0], a[i][1], a[j][0], a[j][1]), dz));
+      backing = Math.min(backing, Math.hypot(
+        segDist(eye[0], eye[1], b[i][0], b[i][1], b[j][0], b[j][1]), dz));
+    }
+  }
+  return { inner: +inner.toFixed(4), backing: +backing.toFixed(4) };
+}
 
 // ---------------------------------------------------------------------------
 // The apertures light has to pass through
