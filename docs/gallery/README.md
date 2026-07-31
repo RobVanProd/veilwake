@@ -166,3 +166,34 @@ to fly into.
 
 Cloud with dark undersides and lit tops, at the altitude and coverage the mood
 suite is measured against.
+
+### 15 — The ocean, once there was one
+![ocean](15-ocean-of-cloud.png)
+
+The same renderer, the same palette, the same time of day. The only change is
+that the sky now has cloud in it.
+
+Coverage is `clamp01(W * gain + bias)`, and at `gain 2.60 / bias -1.58` a column
+produced nothing at all unless the weather map read above 0.608 — so **65.6% of
+the world was exactly zero**, median coverage 0. An earlier sweep had tuned
+`gain` and found a real cliff just above 2.6, which is why nobody looked at
+`bias`. Three complaints that had been filed separately were all this one number:
+the Listener carved every corridor of a full run through air of density zero,
+creature bodies spent 21% of their live seconds inside any weather at all, and
+concealment along the played route measured 0.00 at five of six sampled moments —
+in a game whose only survival verb is hiding.
+
+### 16 — A mass with scale
+![mass](16-a-mass-with-scale.png)
+
+What the extra coverage buys is not brightness. Measured through the real ship
+camera across a full luminary cycle, the frame got *darker* (p50 49.5 → 39.9),
+its dynamic range widened, and its hue variety quadrupled; the "something
+blazing" metric came down off the ceiling it had been grazing at 32.9%. Dread
+needs something in the frame to be dreadful about, and the clear air between
+masses is what makes any of them read as monumental — a third of the sky is
+still open, deliberately.
+
+It is also *cheaper*: median 0.25 ms, p99 5.2 ms against an 11 ms budget. Rays
+that hit dense cloud reach the transmittance cap and die instead of running all
+the way to the far plane.
