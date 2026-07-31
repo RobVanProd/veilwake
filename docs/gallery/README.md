@@ -9,6 +9,25 @@ ever been drawn — all four creatures existed only in the simulation.
 
 ---
 
+### 13 — The console
+![the console](13-the-console.png)
+
+The cockpit is a major visual surface rather than a frame. The six columns in the
+centre are the live signature — acoustic, thermal, photic, EM, wake, relative
+speed — so the thing the whole game is played on is readable at a glance without
+a number on the glass. The shell is sealed now: zero uncovered corner pixels
+across eleven attitudes and four aspect ratios.
+
+### 14 — The pack
+![the pack](14-the-pack.png)
+
+Four Wake Hunters and a Listener, lamps lit, at the beat where the game inverts
+what it has spent ten minutes teaching. Everything until here rewards going quiet
+and holding still; against this one, running is what gets you caught, because
+speed is what writes the trail it follows.
+
+---
+
 ## The creatures
 
 ### 11 — The Listener
