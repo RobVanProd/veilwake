@@ -4,10 +4,45 @@ Captures from the running game, in the order the work happened. Every one is
 produced by `GAME.capture()` — the simulation seeked to an exact tick and
 rendered explicitly — so any of them can be reproduced byte-for-byte.
 
-Start at **08–10**: the three luminaries. They are the biggest change to how the
-game looks and the reason the rest of this page is already out of date.
+Start at **11–12**: the monsters. Until very recently nothing in this game had
+ever been drawn — all four creatures existed only in the simulation.
 
 ---
+
+## The creatures
+
+### 11 — The Listener
+![the Listener](11-the-listener.png)
+
+240 m, acoustically blind, hunts by sound. Dark, matte, carried by silhouette:
+you should almost never see one clearly. It is an ordinary mesh in the ordinary
+scene, so the cloud pass occludes it for free — half inside a mass is half
+hidden.
+
+It had an **eye** until the last pass, which is the worst possible defect on a
+creature whose defining trait is blindness. A flat terminating fan gets a single
+forward normal and behaves like a mirror aimed at the key light, so it read as a
+hard pale disc at any size the eye can resolve. Shrinking it did not help; the
+nose now closes to a degenerate point with no facet to catch a highlight.
+
+### 12 — The Lantern
+![the Lantern](12-the-lantern.png)
+
+The one creature permitted to be beautiful, because §10.2 is built on the player
+choosing to approach it. A ring of 9–20 elements out to 400 m, and its entire
+design is **the dimming** — the elements go out one at a time, countably, and are
+fully dark by the time it has committed to you. The rule a player is meant to
+learn is *"the lights went out, so it knows where I am."*
+
+It renders as a bloom in the vapour rather than a sprite because glowing
+creatures are registered with the cloud's light registry: they light the medium
+they are glowing in. Without that it was a line of bright specks — geometry
+emissive to the camera and invisible to the cloud, which is the difference
+between a light and a picture of one.
+
+---
+
+## The luminaries
 
 ## The luminaries
 
