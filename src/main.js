@@ -16,6 +16,7 @@ import { Loop } from './core/loop.js';
 import { Rng, seedFrom } from './core/rng.js';
 import { BUDGET } from './core/perf.js';
 import { CloudSystem } from './render/clouds.js';
+import { shipLamp, thrusterPlume } from './render/lights.js';
 import { Flight } from './game/flight.js';
 import { ShipCamera } from './game/camera.js';
 import { Controls } from './game/controls.js';
@@ -61,6 +62,22 @@ camera.position.set(0, 0, 0);
 
 const rng = new Rng(seedFrom('veilwake:phase0'));
 const clouds = new CloudSystem({ renderer, seed: 'veilwake', quality: 'high' });
+
+// The ship's own lights.
+//
+// Registering these is the point at which the renderer's local-light path stops
+// being dead code: nothing else in the project ever called shipLamp(), so the
+// registry held four switched-off storm slots and signature() returned 0.
+//
+// It also fixes the half of the frame the palette pass could not. Facing into
+// the sun the world now reads at 15.8% blazing; facing away it read 0.18% —
+// correctly dark, with nothing in it to look at. These are what goes in it. In a
+// world this dark the lamp is not a convenience, it is the only thing the player
+// owns that pushes back on it, and it is also the loudest thing they can do on
+// the photic channel. Beauty is the bait.
+const lampL = clouds.lights.add(shipLamp({ key: 'ship/lamp/port' }));
+const lampR = clouds.lights.add(shipLamp({ key: 'ship/lamp/stbd' }));
+const plume = clouds.lights.add(thrusterPlume({ key: 'ship/thruster' }));
 
 const input = new Input(canvas);
 const pointer = new Pointer(canvas);
@@ -144,6 +161,26 @@ function update(dt) {
   shipCam.update(ship, dt, loop.simTime);
 
   markers.rotation.y = (state.heading += dt * 0.06) * 0.15;
+
+  // Drive the ship's lights from where the ship actually is, before clouds.update
+  // so the registry's per-frame importance sort sees this frame's positions
+  // rather than last frame's. The lamps sit off the hull centreline so the two
+  // beams diverge slightly — a single centred lamp reads as a torch taped to a
+  // camera, two read as a vehicle.
+  const p = ship.position, f = ship.forward, r = ship.right;
+  const on = controls.lightsOn;
+  clouds.lights.set(lampL, { on, position: [p.x - r.x * 1.4, p.y, p.z - r.z * 1.4], direction: [f.x, f.y, f.z] });
+  clouds.lights.set(lampR, { on, position: [p.x + r.x * 1.4, p.y, p.z + r.z * 1.4], direction: [f.x, f.y, f.z] });
+  // The plume is never off — an engine under power glows whether the pilot likes
+  // it or not, which is what makes throttle a signature decision rather than a
+  // free one.
+  clouds.lights.set(plume, {
+    on: true,
+    intensity: 1.5 * (ship.input.throttle || 0),
+    position: [p.x - f.x * 3.5, p.y - f.y * 3.5, p.z - f.z * 3.5],
+    direction: [-f.x, -f.y, -f.z],
+  });
+
   clouds.update(dt, camera);
   input.endFrame();
   pointer.endFrame();
@@ -204,6 +241,8 @@ loop.render = (alpha, frameMs) => {
 globalThis.GAME = {
   THREE, renderer, scene, camera, loop, rng, BUDGET, clouds,
   ship, controls, shipCam, input, pointer, pad,
+  /** The light registry, so a capture can inspect what was actually lit. */
+  lights: clouds.lights,
   stats: () => loop.perf.stats(),
   violations: () => loop.perf.violations(),
 
