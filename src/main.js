@@ -20,6 +20,7 @@ import { shipLamp, thrusterPlume } from './render/lights.js';
 import { Cockpit } from './game/cockpit.js';
 import { Signature } from './game/signature.js';
 import { ShipSystems } from './game/systems.js';
+import { CreatureManager, Listener, createMedium, createSignatureView } from './game/creatures/index.js';
 import { Flight } from './game/flight.js';
 import { ShipCamera } from './game/camera.js';
 import { Controls } from './game/controls.js';
@@ -102,6 +103,60 @@ scene.add(cockpit.object3D);
 // lying to the player about the thing they are trying to manage.
 const systems = new ShipSystems({ lights: clouds.lights });
 const signature = new Signature();
+
+// Where the ship was, keyed by how long ago.
+//
+// Sound takes three seconds to cross a kilometre, so a creature hearing you is
+// hearing a place you have already left — and at 100 m/s that place is 300 m
+// behind. The recorder stores six channels and a timestamp but no position, and
+// without this the sense path has to assume the sound came from wherever the
+// ship is *now*, which quietly converts every acoustic detection into a slightly
+// wrong one. A 20 s ring at 20 Hz is 400 entries and covers the full 6 km the
+// Listener can hear across.
+const TRAIL_HZ = 20, TRAIL_SEC = 20;
+const shipTrail = { buf: new Float32Array(TRAIL_HZ * TRAIL_SEC * 3), head: 0, n: 0, acc: 0 };
+function recordTrail(dt) {
+  shipTrail.acc += dt;
+  const step = 1 / TRAIL_HZ;
+  while (shipTrail.acc >= step) {
+    shipTrail.acc -= step;
+    const i = (shipTrail.head % (TRAIL_HZ * TRAIL_SEC)) * 3;
+    shipTrail.buf[i] = ship.position.x;
+    shipTrail.buf[i + 1] = ship.position.y;
+    shipTrail.buf[i + 2] = ship.position.z;
+    shipTrail.head++;
+    if (shipTrail.n < TRAIL_HZ * TRAIL_SEC) shipTrail.n++;
+  }
+}
+/** @param {number} ageSec seconds ago. Null when the trail does not reach back that far. */
+function shipPositionAt(ageSec) {
+  const back = Math.round(ageSec * TRAIL_HZ);
+  if (!(back >= 0) || back >= shipTrail.n) return null;
+  const i = ((shipTrail.head - 1 - back + TRAIL_HZ * TRAIL_SEC * 2) % (TRAIL_HZ * TRAIL_SEC)) * 3;
+  return { x: shipTrail.buf[i], y: shipTrail.buf[i + 1], z: shipTrail.buf[i + 2] };
+}
+
+// The creatures, and the two views they see the world through.
+const creatures = new CreatureManager({ maxFull: 6 });
+const creatureMedium = createMedium(clouds);
+const creatureSignature = createSignatureView(signature, { positions: { at: shipPositionAt } });
+
+// One Listener, placed far enough away to be found rather than met. It is blind
+// and 240 m long; at cruise the ship is audible to it from about 3.2 km, so this
+// is comfortably outside its hearing until the player does something loud.
+creatures.add(new Listener({
+  position: { x: 900, y: 760, z: -5200 },
+  seed: seedFrom('listener/first'),
+}));
+
+// shipPos is filled in per frame rather than captured here: `ship` is declared
+// further down and reading it now is a temporal dead zone, which fails at import
+// with "Cannot access 'ship' before initialization" and takes the page with it.
+const creatureCtx = {
+  t: 0, tick: 0, shipPos: null,
+  medium: creatureMedium, signature: creatureSignature,
+  rng: () => rng.float(),
+};
 
 const input = new Input(canvas);
 const pointer = new Pointer(canvas);
@@ -193,6 +248,15 @@ function update(dt) {
   // and BEFORE anything senses it — a creature reacting to last frame's
   // emissions is a creature reacting to a position the player has already left.
   signature.update(dt, ship, systems, loop.simTime);
+  recordTrail(dt);
+
+  // Creatures last: they sense a signature that is already this frame's, from a
+  // ship that has already moved. Sensing before either would have them reacting
+  // to a position the player has left and a noise they have not made yet.
+  creatureCtx.t = loop.simTime;
+  creatureCtx.tick = loop.tick;
+  creatureCtx.shipPos = ship.position;
+  creatures.update(dt, loop.tick, creatureCtx);
 
 
   // Drive the ship's lights from where the ship actually is, before clouds.update
@@ -276,7 +340,9 @@ globalThis.GAME = {
   ship, controls, shipCam, input, pointer, pad,
   /** The light registry, so a capture can inspect what was actually lit. */
   lights: clouds.lights,
-  cockpit, systems, signature,
+  cockpit, systems, signature, creatures,
+  /** Where the ship was `ageSec` ago — the sound source, not the ship. */
+  shipPositionAt,
   stats: () => loop.perf.stats(),
   violations: () => loop.perf.violations(),
 
