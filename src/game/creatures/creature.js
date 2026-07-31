@@ -21,8 +21,11 @@
 //
 // No Three.js import. Vectors here are plain `{x, y, z}` objects, which keeps the
 // whole creature layer runnable outside the renderer — the tests in
-// `tests/listener.js` construct a world with no GPU in it at all, and a test that
-// needs a WebGL context is a test that stops being run.
+// `tests/creature.test.js` construct a world with no GPU in it at all, and a test
+// that needs a WebGL context is a test that stops being run.
+//
+// Importing this file has no side effects: it defines classes and constants and
+// touches nothing global.
 
 import { clamp, clamp01 } from '../../core/math.js';
 
@@ -190,10 +193,24 @@ const smooth01 = (e0, e1, x) => {
  *   - **`duct` and `turbulence` are cached on a coarse grid.** Both are smooth
  *     fields and both need several density evaluations to derive; sampling them
  *     exactly at eight points along every path, for every creature, ten times a
- *     second, is the single most expensive thing the AI could do. The cache is
- *     keyed on quantised position and time, so it returns bit-identical values
- *     whether or not it happens to be warm — a cache that changes results under
- *     replay is worse than no cache.
+ *     second, is the single most expensive thing the AI could do.
+ *
+ * **The cache is keyed on the field's own advection state, not on `t`.** That
+ * distinction was a real bug and is worth stating. `CloudSystem.densityAt` has no
+ * time parameter at all — the field's time dependence lives entirely in
+ * `clouds.field.shapeAdvect`, which `clouds.update()` moves. A cache keyed on a
+ * quantised `t` therefore had time in the key and not in the computation, so a
+ * warm entry could answer a query from a field state up to a whole cache
+ * generation old while `density` beside it was sampled live. Two calls with the
+ * same `(x, y, z, t)` genuinely returned different answers depending on whether
+ * the table happened to be warm, which §2.1 forbids and §12's "replaying the same
+ * seed produces an identical detection log" depends on.
+ *
+ * Keying on the advection offsets makes the key *be* the thing the value depends
+ * on, so warm and cold agree by construction. The offsets are quantised to
+ * `advectM` metres, which is the one approximation left and the only one §2.2
+ * needs an error bound for: `tests/creature.test.js` measures it rather than
+ * asserting it.
  */
 export function createMedium(source, opts = {}) {
   if (!source) return createFlatMedium(opts);
@@ -201,16 +218,46 @@ export function createMedium(source, opts = {}) {
   if (typeof source.densityAt !== 'function') return createFlatMedium(opts);
 
   const cellM = opts.cellM ?? 64;         // metres per derived-field cache cell
-  const cellS = opts.cellS ?? 1.0;        // seconds per derived-field cache generation
   const gradH = opts.gradH ?? 60;         // finite-difference arm, metres
+  // Field advection quantum. The derived quantities are built from a 60 m
+  // gradient arm, so 4 m of field motion is fifteen times finer than the thing
+  // being measured. At the shape wind's 11 m/s that is a new generation every
+  // 0.36 s, which is what pays for the cache.
+  const advectM = opts.advectM ?? 4;
+  const cellS = opts.cellS ?? 0.25;       // fallback generation, for sources with no `field`
   const cache = new Map();
   const out = makeMediumSample();
   const flowTmp = { x: 0, y: 0, z: 0, turbulence: 0 };
 
+  // §8: the budget is stated in `Medium.sample()` calls, but the *cost* is field
+  // evaluations, and one is not the other. These count the real work so the two
+  // numbers can never be confused for each other again.
+  let nDensity = 0, nFlow = 0;
+  const densityAt = (x, y, z) => { nDensity++; return source.densityAt(x, y, z, 0); };
+
+  const hasFlow = typeof source.flowAt === 'function';
+  const advect = source.field && source.field.shapeAdvect;
+  let generation = null;
+
+  // A source that changes for reasons of its own — a carved corridor, say —
+  // supplies its own key, so the derived-field cache invalidates on that too.
+  const generationKey = typeof source.generationKey === 'function'
+    ? () => source.generationKey()
+    : (t) => (advect
+      ? `${Math.round(advect[0] / advectM)},${Math.round(advect[1] / advectM)},${Math.round(advect[2] / advectM)}`
+      : `${Math.round(t / cellS)}`);
+
   const derive = (x, y, z, t) => {
+    const gen = generationKey(t);
+    if (gen !== generation) { generation = gen; cache.clear(); }
+
     const ix = Math.round(x / cellM), iy = Math.round(y / cellM), iz = Math.round(z / cellM);
-    const it = Math.round(t / cellS);
-    const key = `${ix},${iy},${iz},${it}`;
+    // A string key rather than a packed integer: the world is 24 km across and
+    // nothing bounds `y`, so any packing wide enough to be safe is wider than a
+    // double's integer range. A collision here is a creature reading another
+    // cell's duct, which is the kind of bug that only ever appears in a log
+    // nobody can reproduce.
+    const key = `${ix},${iy},${iz}`;
     let e = cache.get(key);
     if (e) return e;
     const cx = ix * cellM, cy = iy * cellM, cz = iz * cellM;
@@ -218,24 +265,28 @@ export function createMedium(source, opts = {}) {
     // Tetrahedral gradient: four evaluations instead of the six a central
     // difference needs, for the same order of accuracy.
     const h = gradH;
-    const k0 = source.densityAt(cx + h, cy - h, cz - h, 0);
-    const k1 = source.densityAt(cx - h, cy - h, cz + h, 0);
-    const k2 = source.densityAt(cx - h, cy + h, cz - h, 0);
-    const k3 = source.densityAt(cx + h, cy + h, cz + h, 0);
+    const k0 = densityAt(cx + h, cy - h, cz - h);
+    const k1 = densityAt(cx - h, cy - h, cz + h);
+    const k2 = densityAt(cx - h, cy + h, cz - h);
+    const k3 = densityAt(cx + h, cy + h, cz + h);
     const gx = (k0 - k1 - k2 + k3) / (4 * h);
     const gy = (-k0 - k1 + k2 + k3) / (4 * h);
     const gz = (-k0 + k1 - k2 + k3) / (4 * h);
     const rhoLocal = (k0 + k1 + k2 + k3) * 0.25;
 
-    source.flowAt(cx, cy, cz, flowTmp);
+    // A density-only source is a legitimate synthetic world — the guard above
+    // accepts one, so this has to as well. Still air, not a crash.
+    if (hasFlow) { nFlow++; source.flowAt(cx, cy, cz, flowTmp); }
+    else { flowTmp.x = 0; flowTmp.y = 0; flowTmp.z = 0; flowTmp.turbulence = 0; }
+
     e = {
       duct: ductFromField(Math.hypot(gx, gy, gz), rhoLocal),
       turbulence: clamp01(flowTmp.turbulence),
       flow: { x: flowTmp.x, y: flowTmp.y, z: flowTmp.z },
       charge: chargeFromStorms(source, cx, cy, cz),
     };
-    // Wholesale clear rather than an LRU. Values are a pure function of the key,
-    // so dropping the table cannot change an answer, only its cost.
+    // Wholesale clear rather than an LRU. Values are a pure function of the key
+    // *and the generation*, so dropping the table cannot change an answer.
     if (cache.size > 8192) cache.clear();
     cache.set(key, e);
     return e;
@@ -244,7 +295,9 @@ export function createMedium(source, opts = {}) {
   return {
     sample(x, y, z, t, dst = out) {
       const e = derive(x, y, z, t);
-      dst.density = clamp01(source.densityAt(x, y, z, 0));
+      // §2.2, the one-field rule: density is the live field at the exact point,
+      // never the cached cell. Only the derived quantities are approximated.
+      dst.density = clamp01(densityAt(x, y, z));
       dst.temperature = AMBIENT_K;
       dst.charge = e.charge;
       dst.flow.x = e.flow.x; dst.flow.y = e.flow.y; dst.flow.z = e.flow.z;
@@ -254,6 +307,11 @@ export function createMedium(source, opts = {}) {
     },
     /** Line of sight, when an archetype needs it. The Listener does not. */
     transmittance: source.transmittance ? source.transmittance.bind(source) : null,
+    /** Real field work, not `sample()` calls. See `countingMedium`. */
+    fieldEvals() { return { densityAt: nDensity, flowAt: nFlow }; },
+    resetFieldEvals() { nDensity = 0; nFlow = 0; },
+    /** Which field state the derived values currently describe. */
+    generation() { return generation; },
     _cache: cache,
   };
 }
@@ -295,40 +353,113 @@ export function createFlatMedium({ density = 0, turbulence = 0, charge = 0, duct
 // ---------------------------------------------------------------------------
 
 /**
- * Normalise the signature system into the one thing a sense needs: what the ship
- * was emitting at a given moment, **and where it was when it emitted it**.
+ * Where the ship was, on the same schedule the signature recorder runs on.
  *
- * This is the one place the contract left room to disagree, so the reading is
- * stated here rather than assumed. §5.2 says an acoustic sense reads the past and
- * points at §3.4's recorder as the mechanism, but §3.4 lists six channels and no
- * position. Transmission (§4.1) needs a distance and a path, and both are
- * properties of where the sound was *made*, not of where the ship is now.
+ * §3.4 specifies six channels and no position, and `SignatureRecorder` implements
+ * exactly that. But transmission (§4.1) needs a distance and a path, and both are
+ * properties of where the sound was *made*: a ship at cruise covers 1.3 km during
+ * the 9.1 s a call takes to travel 3 km, so ranging it from where it is now is
+ * ranging the wrong ship. Without this, the propagation delay is observable in
+ * *emission* and not in *geometry*, which is half of the mechanic.
  *
- * **Chosen reading: the recorder stores position alongside the six channels.** It
- * is three more floats on a 14 KB buffer and it is the difference between a
- * detection that can be replayed and one that cannot.
+ * This lives here rather than as three more floats on the recorder because
+ * `src/game/signature.js` is owned elsewhere; it is the same 2 Hz, 300 s ring and
+ * it costs 7.2 KB. If position ever joins the recorder's channel set, delete this
+ * and pass the recorder as `positions` — the interface is the same `at(ageSec)`.
  *
- * If a signature implementation does not store position, this adapter falls back
- * to the ship's current position and stamps `positionExact: false` on the
- * percept, which travels into the detection log. A log line that admits its own
- * path was approximated is worth more than one that quietly is.
- *
- * Accepted shapes, in order: `sampleAt(t)`, `at(t)`, `historyAt(t)`, a bare
- * function, or a live object read as "now".
+ * Samples are interpolated between the two straddling entries. At 2 Hz and
+ * 148 m/s the raw samples are 74 m apart, which is a bearing error of 1.4° at
+ * 3 km for nothing.
  */
-export function createSignatureView(source) {
-  const pick = (o) => (typeof o?.sampleAt === 'function' ? o.sampleAt.bind(o)
-    : typeof o?.at === 'function' ? o.at.bind(o)
-    : typeof o?.historyAt === 'function' ? o.historyAt.bind(o)
-    : typeof o === 'function' ? o
-    : null);
+export class PositionHistory {
+  constructor({ seconds = 300, hz = 2 } = {}) {
+    this.hz = hz;
+    this.capacity = Math.round(seconds * hz);
+    this.data = new Float32Array(this.capacity * 3);
+    this.times = new Float32Array(this.capacity);
+    this.head = 0;
+    this.count = 0;
+    this._acc = 0;
+    this._period = 1 / hz;
+    this._out = { x: 0, y: 0, z: 0, simTime: 0 };
+  }
 
-  const history = pick(source);
-  const live = () => (typeof source?.current === 'function' ? source.current() : source);
+  /** Call every simulation step with the same `dt` the signature gets. */
+  record(dt, time, pos) {
+    this._acc += dt;
+    if (this._acc < this._period) return false;
+    this._acc -= this._period;
+    const i = this.head * 3;
+    this.data[i] = pos.x; this.data[i + 1] = pos.y; this.data[i + 2] = pos.z;
+    this.times[this.head] = time;
+    this.head = (this.head + 1) % this.capacity;
+    if (this.count < this.capacity) this.count++;
+    return true;
+  }
 
-  const norm = (s, fallbackPos, exact) => {
+  /** Where the ship was `ageSec` ago, or null if that is older than the ring. */
+  at(ageSec) {
+    if (this.count === 0 || ageSec < 0) return null;
+    const back = ageSec * this.hz;
+    const b0 = Math.floor(back), f = back - b0;
+    if (b0 + 1 >= this.count) {
+      if (b0 >= this.count) return null;
+      return this._read(b0, 0, b0);
+    }
+    return this._read(b0, f, b0 + 1);
+  }
+
+  _read(b0, f, b1) {
+    const i0 = (this.head - 1 - b0 + this.capacity * 2) % this.capacity;
+    const i1 = (this.head - 1 - b1 + this.capacity * 2) % this.capacity;
+    const a = i0 * 3, b = i1 * 3;
+    const o = this._out;
+    o.x = this.data[a] + (this.data[b] - this.data[a]) * f;
+    o.y = this.data[a + 1] + (this.data[b + 1] - this.data[a + 1]) * f;
+    o.z = this.data[a + 2] + (this.data[b + 2] - this.data[a + 2]) * f;
+    o.simTime = this.times[i0] + (this.times[i1] - this.times[i0]) * f;
+    return o;
+  }
+
+  spanSec() { return this.count / this.hz; }
+  reset() { this.head = 0; this.count = 0; this._acc = 0; }
+}
+
+/**
+ * Normalise the signature system into the one thing a sense needs: what the ship
+ * was emitting a given number of seconds ago, and where it was.
+ *
+ * **The argument is an age in seconds, not an absolute sim time, and the method is
+ * called `at` because that is what `SignatureRecorder.at` is called and what it
+ * means.** This was the other real bug in this file: the view took `t` and
+ * forwarded it into a function whose parameter is `ageSec`. The two conventions
+ * are mirror images about the present, so the adapter did not fail, it lied — at
+ * t=60 s a 3 km listener asking for 50.91 got the sample from simTime 9.0, 42 s
+ * wrong in the wrong direction, and past 300 s it returned null at every distance
+ * forever. Nothing type-checks the difference between two numbers of seconds, so
+ * the only defence is that the name and the convention agree, everywhere.
+ *
+ * If no position history is supplied, this falls back to the ship's current
+ * position and stamps `positionExact: false`, which travels into the detection
+ * log. A log line that admits its own path was approximated is worth more than
+ * one that quietly is.
+ *
+ * Accepted shapes: a `SignatureRecorder`, a `Signature` (its `.recorder` is
+ * used), a bare `(ageSec) => sample` function, or a live object read as "now".
+ */
+export function createSignatureView(source, { positions = null } = {}) {
+  const rec = source && typeof source.at === 'function' ? source
+    : source && source.recorder && typeof source.recorder.at === 'function' ? source.recorder
+    : null;
+  const history = rec ? (ageSec) => rec.at(ageSec)
+    : typeof source === 'function' ? source
+    : null;
+  const live = () => (typeof source?.current === 'function' ? source.current()
+    : typeof source?.values === 'function' ? source.values()
+    : source);
+
+  const norm = (s, pos, exact, ageSec) => {
     if (!s) return null;
-    const pos = s.position || s.pos || (s.x !== undefined ? s : null) || fallbackPos;
     return {
       acoustic: s.acoustic ?? 0,
       thermal: s.thermal ?? 0,
@@ -337,21 +468,44 @@ export function createSignatureView(source) {
       wake: s.wake ?? 0,
       relSpeed: s.relSpeed ?? 0,
       x: pos?.x ?? 0, y: pos?.y ?? 0, z: pos?.z ?? 0,
-      positionExact: exact && !!(s.position || s.pos || s.x !== undefined),
+      positionExact: exact,
+      ageSec,
       simTime: s.simTime ?? null,
     };
   };
 
   return {
     hasHistory: !!history,
-    /** What the ship was emitting at `t`, and where it was. Null before the log starts. */
-    sampleAt(t, fallbackPos) {
-      if (!history) return norm(live(), fallbackPos, false);
-      return norm(history(t), fallbackPos, true);
+    hasPositions: !!positions,
+    /** Seconds of past available. A sense asking beyond this gets null, not a lie. */
+    spanSec() {
+      if (!rec) return positions ? positions.spanSec() : 0;
+      const s = rec.count / rec.hz;
+      return positions ? Math.min(s, positions.spanSec()) : s;
     },
+    /**
+     * What the ship was emitting `ageSec` ago, and where it was.
+     * Null when that is older than the recorder — §7 would rather have no
+     * detection than one built on the present mistaken for the past.
+     */
+    at(ageSec, fallbackPos) {
+      if (!history) return norm(live(), fallbackPos, false, 0);
+      const s = history(ageSec);
+      if (!s) return null;
+      const p = positions ? positions.at(ageSec) : null;
+      return norm(s, p || fallbackPos, !!p, ageSec);
+    },
+    /** Same thing, spelled so a call site cannot read it as an absolute time. */
+    ago(ageSec, fallbackPos) { return this.at(ageSec, fallbackPos); },
+    /**
+     * Where the ship was `ageSec` ago, or null. Separate from `at()` because
+     * solving for the flight time needs the geometry several times before it
+     * needs the emission once.
+     */
+    positionAt(ageSec) { return positions ? positions.at(ageSec) : null; },
     /** Emissions right now. Contact channels only — everything else travels. */
     current(fallbackPos) {
-      return norm(live(), fallbackPos, true);
+      return norm(live(), fallbackPos, true, 0);
     },
   };
 }
@@ -464,7 +618,9 @@ export function formatEvent(e) {
   return `${head}  emitted ${e.emitted.toFixed(1)}, transmitted ${e.transmitted.toFixed(1)} at ` +
     `${Math.round(e.distance)} m through rho ${(m.rho_mean ?? 0).toFixed(2)} / duct ` +
     `${(m.g_mean ?? 0).toFixed(2)}, threshold ${e.threshold.toFixed(1)}` +
-    (e.real === false ? '  [false positive]' : '');
+    (e.real === false ? '  [false positive]' : '') +
+    (e.mediumFresh === false ? '  [path from an earlier tick]' : '') +
+    (e.positionExact === false ? '  [ranged from the present, not the emission]' : '');
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +693,27 @@ export class Creature {
     this._lastCause = null;
     this._transitions = 0;
     this.mediumSamplesLastTick = 0;
+    this._senseSerial = 0;
+    this._termsSerial = -1;
+    /** Shared sink, set by `CreatureManager`, so `GAME.detectionLog()` is one list. */
+    this.logSink = null;
+  }
+
+  /**
+   * Fill `this._terms` from a path integral, and stamp it as belonging to this
+   * sense tick. §4, and §7's requirement that a record explain itself.
+   *
+   * Archetypes must reach the medium through this rather than calling
+   * `pathTerms` with their own destination object. The terms are what turns a log
+   * line from "it was heard" into "it was heard at six kilometres *because it was
+   * inside a duct*", and that clause is the whole point of the record. The stamp
+   * is so the log can say when it is missing instead of quietly printing zeroes,
+   * which is what it used to do for every event ever written.
+   */
+  measurePath(medium, from, to, t) {
+    pathTerms(medium, from.x, from.y, from.z, to.x, to.y, to.z, t, this._terms);
+    this._termsSerial = this._senseSerial;
+    return this._terms;
   }
 
   /** §8. Detection is only ever produced by a fully simulated creature. */
@@ -561,10 +738,14 @@ export class Creature {
   }
 
   _senseTick(ctx) {
-    const before = ctx.medium.samplesTaken ? ctx.medium.samplesTaken() : 0;
+    this._senseSerial++;
+    // `ctx.medium` is optional: an archetype that senses trails or contact never
+    // touches it, and requiring it made `update()` throw for a creature that had
+    // no use for one. Counting is optional on top of that.
+    const counter = ctx.medium && ctx.medium.samplesTaken ? ctx.medium : null;
+    const before = counter ? counter.samplesTaken() : 0;
     const percepts = this.sense(ctx) || [];
-    this.mediumSamplesLastTick =
-      (ctx.medium.samplesTaken ? ctx.medium.samplesTaken() : 0) - before;
+    this.mediumSamplesLastTick = counter ? counter.samplesTaken() - before : 0;
 
     // §5.4: multiple channels do not add. The strongest wins.
     let best = null, bestExcess = 0;
@@ -596,33 +777,74 @@ export class Creature {
    * escalation rather than as a teleport. With a fill rate of 0.12 and a 0.1 s
    * tick, attention cannot move far enough in one tick to skip a rung anyway;
    * the loop is here so that stays true if a future archetype is faster.
+   *
+   * Two rules the first version of this got wrong, both worth stating because
+   * both were invisible in the code and obvious in the log:
+   *
+   * **A resolve may only travel in one direction.** It used to `continue` after a
+   * down-step, re-enter the loop and immediately promote again, so a single tick
+   * could emit `COMMITTED→SEARCHING` and `SEARCHING→TRACKING` at the same
+   * timestamp. The net observable transition was `COMMITTED→TRACKING`, which §6
+   * forbids by name.
+   *
+   * **Leaving COMMITTED costs the attention too.** Fixing the loop alone is not
+   * enough: COMMITTED's exit line is 0.736 and TRACKING's entry is 0.70, three
+   * seconds apart at the Listener's decay, so a creature demoted to SEARCHING
+   * would climb straight back into TRACKING and never hunt the area. Dropping
+   * attention to `stateExit(TRACKING)` is not an invented number — it is exactly
+   * the attention the creature would have held if it had walked down one rung at
+   * a time, which is what "goes to SEARCHING, not TRACKING" has to mean if it
+   * means anything.
    */
   _resolveStates(ctx, cause) {
+    let dir = 0;
     for (let guard = 0; guard < STATE_ORDER.length; guard++) {
       const i = STATE_ORDER.indexOf(this.state);
       const up = STATE_ORDER[i + 1];
-      if (up && this.attention >= STATE_ENTRY[up]) {
+      if (dir >= 0 && up && this.attention >= STATE_ENTRY[up]) {
+        dir = 1;
         this._transition(up, ctx, cause);
         continue;
       }
-      if (i > 0 && this.attention < stateExit(this.state)) {
-        // §6: something that has committed and lost you does not politely resume
-        // tracking, it starts hunting the area.
-        const down = this.state === STATE.COMMITTED ? STATE.SEARCHING : STATE_ORDER[i - 1];
-        this._transition(down, ctx, null);
+      if (dir <= 0 && i > 0 && this.attention < stateExit(this.state)) {
+        dir = -1;
+        if (this.state === STATE.COMMITTED) {
+          // §6: something that has committed and lost you does not politely
+          // resume tracking, it starts hunting the area.
+          this.attention = Math.min(this.attention, stateExit(STATE.TRACKING));
+          this._transition(STATE.SEARCHING, ctx, null);
+        } else {
+          this._transition(STATE_ORDER[i - 1], ctx, null);
+        }
         continue;
       }
       break;
     }
   }
 
-  _transition(to, ctx, cause) {
+  _transition(to, ctx, cause, channel) {
     const from = this.state;
     if (from === to) return;
     this.state = to;
     this._transitions++;
     this.onStateChange(from, to, ctx);
-    this.logEvent(ctx, from, to, cause);
+    this.logEvent(ctx, from, to, cause, channel);
+  }
+
+  /**
+   * Move a creature without a percept, and say in the log that that is what
+   * happened. §7.1 forbids turning towards the player without a percept; this is
+   * the other direction, and the only caller is the manager enforcing §6's
+   * one-COMMITTED rule.
+   */
+  forceState(to, ctx, channel = 'yield') {
+    if (this.state === to) return false;
+    const up = STATE_ORDER[STATE_ORDER.indexOf(to) + 1];
+    // Keep attention consistent with the state it is being put into, or the next
+    // resolve simply undoes this.
+    if (up) this.attention = Math.min(this.attention, stateExit(up));
+    this._transition(to, ctx, null, channel);
+    return true;
   }
 
   /**
@@ -630,26 +852,32 @@ export class Creature {
    * the highest-severity bug in this project, which is why the write lives inside
    * `_transition` and not at any call site.
    */
-  logEvent(ctx, from, to, cause) {
+  logEvent(ctx, from, to, cause, channel) {
     const c = cause || this._lastCause;
     const decayed = !cause;
+    const fresh = this._termsSerial === this._senseSerial;
     const ev = {
       tick: ctx.tick,
       simTime: ctx.t,
       creature: this.id,
       archetype: this.archetype,
       from, to,
-      channel: decayed ? 'decay' : c.channel,
+      channel: channel || (decayed ? 'decay' : c.channel),
       emitted: decayed ? null : (c.emitted ?? null),
       transmitted: decayed ? null : c.strength,
       threshold: this.currentThreshold(),
-      distance: ctx.shipPos ? vdist(this.position, ctx.shipPos) : null,
+      distance: decayed ? (ctx.shipPos ? vdist(this.position, ctx.shipPos) : null)
+        : (c.distance ?? (ctx.shipPos ? vdist(this.position, ctx.shipPos) : null)),
       medium: {
         rho_mean: this._terms.rho_mean,
         u_mean: this._terms.u_mean,
         q_mean: this._terms.q_mean,
         g_mean: this._terms.g_mean,
       },
+      // The path terms are only this tick's if an archetype measured a path this
+      // tick. A de-escalation carries the last measured path, and says so.
+      mediumFresh: fresh,
+      positionExact: decayed ? null : (c.positionExact ?? null),
       real: decayed ? null : c.real,
       attention: this.attention,
     };
@@ -659,12 +887,13 @@ export class Creature {
 
   /** §8. Promotion is a log entry too, so nothing appears from nowhere. */
   logPromotion(ctx, from, to, distance) {
-    this._push({
+    return this._push({
       tick: ctx.tick, simTime: ctx.t, creature: this.id, archetype: this.archetype,
       from, to, channel: 'promotion',
       emitted: null, transmitted: null, threshold: this.currentThreshold(),
       distance,
       medium: { rho_mean: 0, u_mean: 0, q_mean: 0, g_mean: 0 },
+      mediumFresh: false, positionExact: null,
       real: null, attention: this.attention,
     });
   }
@@ -672,6 +901,8 @@ export class Creature {
   _push(ev) {
     this._log.push(ev);
     if (this._log.length > this._logCapacity) this._log.shift();
+    if (this.logSink) this.logSink(ev);
+    return ev;
   }
 
   /** The last 64, oldest first. §7. */
@@ -729,9 +960,17 @@ export class Creature {
  * Wrap a medium so it counts its own sampling.
  *
  * §8 caps a creature at 32 medium samples per sense tick, and a cap nobody
- * measures is a cap that has already been exceeded. The counter costs one integer
- * increment per sample and it is what lets `tests/listener.js` assert the budget
- * rather than assume it.
+ * measures is a cap that has already been exceeded. `samplesTaken()` is that
+ * number, in the contract's own unit: calls to `Medium.sample()`.
+ *
+ * **`fieldEvals()` is the other number, and the two are not interchangeable.**
+ * One cold `sample()` costs one `densityAt` for the density plus, inside
+ * `derive()`, four more for the tetrahedral gradient and one `flowAt` — and
+ * `CloudSystem.flowAt` makes three further density evaluations of its own. So a
+ * counter that says 8 can be hiding 64 evaluations of the field. The cache
+ * amortises almost all of it in steady state, but a budget instrument that cannot
+ * tell you the difference between eight and sixty-four is not an instrument.
+ * `tests/creature.test.js` measures both against the real field.
  */
 export function countingMedium(medium) {
   let n = 0;
@@ -740,6 +979,10 @@ export function countingMedium(medium) {
     transmittance: medium.transmittance,
     samplesTaken() { return n; },
     resetSamples() { n = 0; },
+    /** Real field work underneath, when the wrapped medium can report it. */
+    fieldEvals() { return medium.fieldEvals ? medium.fieldEvals() : null; },
+    resetFieldEvals() { if (medium.resetFieldEvals) medium.resetFieldEvals(); },
+    generation() { return medium.generation ? medium.generation() : null; },
     inner: medium,
   };
 }
