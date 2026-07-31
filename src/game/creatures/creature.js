@@ -730,6 +730,13 @@ export class Creature {
    * stutters when it passes close.
    */
   update(dt, tick, ctx) {
+    // `dormant` is for the director, not for the simulation: a creature that is
+    // in the world but not yet part of the story neither senses nor moves. It is
+    // deliberately not the same as removing it — a creature that vanishes and
+    // reappears is one the player cannot build a model of, and §7 says a
+    // detection has to be explainable. Dormant is a thing that could have
+    // happened on its own: it is elsewhere, and it has not noticed anything.
+    if (this.dormant) return this;
     if (this.fullySimulated && ((tick + this.senseOffset) % SENSE_PERIOD) === 0) {
       this._senseTick(ctx);
     }

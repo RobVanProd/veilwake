@@ -21,6 +21,8 @@ import { Cockpit } from './game/cockpit.js';
 import { Signature } from './game/signature.js';
 import { ShipSystems } from './game/systems.js';
 import { CreatureManager, Listener, createMedium, createSignatureView } from './game/creatures/index.js';
+import { Director, OUTCOME } from './game/director.js';
+import { Captions } from './ui/caption.js';
 import { Flight } from './game/flight.js';
 import { ShipCamera } from './game/camera.js';
 import { Controls } from './game/controls.js';
@@ -165,6 +167,21 @@ const pad = new Gamepad();
 const controls = new Controls(input, pointer, pad);
 const shipCam = new ShipCamera(camera);
 
+// The slice: what happens, and what makes it happen. Constructed after the ship
+// and controls it reads, and updated last each frame so a beat can advance on
+// the same step the player earned it.
+const captions = new Captions();
+const director = new Director({
+  clouds, creatures, signature, systems, ship, controls, rng: () => rng.float(),
+});
+director.onCaption = (t) => captions.say(t);
+let endingShown = false;
+captions.onRetry = () => {
+  endingShown = false;
+  captions.hideEnding();
+  director.restart();
+};
+
 // Start inside the cloud layer rather than above it. Where the camera sits is
 // art direction here, not scene setup: the same renderer looks like a flight sim
 // from above the layer and like this game from inside it.
@@ -257,6 +274,15 @@ function update(dt) {
   creatureCtx.tick = loop.tick;
   creatureCtx.shipPos = ship.position;
   creatures.update(dt, loop.tick, creatureCtx);
+
+  // The director reads the frame everything else just produced, so a beat can
+  // advance on the same step the player earned it rather than one behind.
+  director.update(dt, loop.simTime);
+  captions.update(dt);
+  if (director.outcome !== OUTCOME.RUNNING && !endingShown) {
+    endingShown = true;
+    captions.showEnding(director.outcome, { attempts: director.attempts });
+  }
 
 
   // Drive the ship's lights from where the ship actually is, before clouds.update
@@ -351,7 +377,7 @@ globalThis.GAME = {
   ship, controls, shipCam, input, pointer, pad,
   /** The light registry, so a capture can inspect what was actually lit. */
   lights: clouds.lights,
-  cockpit, systems, signature, creatures,
+  cockpit, systems, signature, creatures, director, captions,
   /** Where the ship was `ageSec` ago — the sound source, not the ship. */
   shipPositionAt,
   stats: () => loop.perf.stats(),
