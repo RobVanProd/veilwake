@@ -410,6 +410,117 @@ export function makeWeatherMap({ size = 128, seed = 3 } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Blue noise
+// ---------------------------------------------------------------------------
+
+/**
+ * A tiling blue-noise mask, by void-and-cluster (Ulichney).
+ *
+ * This started as an interleaved gradient noise function — one multiply-add, no
+ * texture, and the usual choice. It was wrong here, and the captures said so:
+ * IGN has real energy at middle spatial frequencies, and middle frequencies are
+ * exactly what a reconstruction filter cannot remove. The lit face of every
+ * cloud came out with a fine diagonal weave across it. IGN is the right choice
+ * when frames are accumulated over time, because the pattern is designed to
+ * cancel against its own temporal offsets; this renderer deliberately keeps no
+ * history, so it never gets that cancellation.
+ *
+ * Blue noise puts its energy where the 3x3 upsample throws it away. The result
+ * is grain rather than pattern, and grain at a quarter of the amplitude.
+ *
+ * 64 squared costs about a tenth of a second to build, which is most of what
+ * this module spends on anything other than the shape volume. The size is the
+ * knob if that ever needs to come down.
+ */
+export function makeBlueNoiseTile({ size = 64, seed = 5 } = {}) {
+  const n = size * size;
+  const energy = new Float32Array(n);
+  const on = new Uint8Array(n);
+
+  // Gaussian energy kernel, precomputed. sigma 1.5 is Ulichney's; the radius is
+  // where the term stops mattering at float precision.
+  const R = 6;
+  const K = 2 * R + 1;
+  const kern = new Float32Array(K * K);
+  for (let dy = -R; dy <= R; dy++) {
+    for (let dx = -R; dx <= R; dx++) {
+      kern[(dy + R) * K + (dx + R)] = Math.exp(-(dx * dx + dy * dy) / (2 * 1.5 * 1.5));
+    }
+  }
+
+  const splat = (idx, sign) => {
+    const x0 = idx % size, y0 = (idx / size) | 0;
+    for (let dy = -R; dy <= R; dy++) {
+      const row = imod(y0 + dy, size) * size;
+      const krow = (dy + R) * K + R;
+      for (let dx = -R; dx <= R; dx++) {
+        energy[row + imod(x0 + dx, size)] += sign * kern[krow + dx];
+      }
+    }
+  };
+
+  const tightestCluster = () => {
+    let best = -1, bestE = -Infinity;
+    for (let i = 0; i < n; i++) if (on[i] && energy[i] > bestE) { bestE = energy[i]; best = i; }
+    return best;
+  };
+  const largestVoid = () => {
+    let best = -1, bestE = Infinity;
+    for (let i = 0; i < n; i++) if (!on[i] && energy[i] < bestE) { bestE = energy[i]; best = i; }
+    return best;
+  };
+
+  // Initial pattern: a tenth of the pixels, placed by hash.
+  let ones = 0;
+  const target = Math.max(1, Math.round(n * 0.1));
+  for (let i = 0; ones < target && i < n * 4; i++) {
+    const p = hash3i(i, 7, 13, seed) % n;
+    if (!on[p]) { on[p] = 1; splat(p, 1); ones++; }
+  }
+
+  // Phase 0: relax it until moving the tightest cluster into the largest void
+  // stops changing anything. Bounded, because the classic formulation can
+  // oscillate between two equally good arrangements.
+  for (let iter = 0; iter < n * 2; iter++) {
+    const c = tightestCluster();
+    on[c] = 0; splat(c, -1);
+    const v = largestVoid();
+    if (v === c) { on[c] = 1; splat(c, 1); break; }
+    on[v] = 1; splat(v, 1);
+  }
+
+  const rank = new Int32Array(n).fill(-1);
+  const state = on.slice();
+  const stateEnergy = energy.slice();
+
+  // Phase 1: take the initial pattern apart, tightest cluster first. Those get
+  // the lowest ranks, so the darkest pixels are the most spread out.
+  for (let r = ones - 1; r >= 0; r--) {
+    const c = tightestCluster();
+    rank[c] = r;
+    on[c] = 0; splat(c, -1);
+  }
+
+  // Phase 2: put it back together and keep going, filling the largest void each
+  // time, to the end of the range.
+  on.set(state); energy.set(stateEnergy);
+  for (let r = ones; r < n; r++) {
+    const v = largestVoid();
+    rank[v] = r;
+    on[v] = 1; splat(v, 1);
+  }
+
+  const data = new Uint8Array(n * 4);
+  const inv = 255 / (n - 1);
+  for (let i = 0; i < n; i++) {
+    const b = Math.round(rank[i] * inv);
+    data[i * 4] = data[i * 4 + 1] = data[i * 4 + 2] = b;
+    data[i * 4 + 3] = 255;
+  }
+  return { size, data, channels: 4 };
+}
+
+// ---------------------------------------------------------------------------
 // CPU sampling — the half of the agreement guarantee that runs on this side
 // ---------------------------------------------------------------------------
 

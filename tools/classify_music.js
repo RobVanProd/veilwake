@@ -183,25 +183,58 @@ function fft(re, im) {
  * the audio does the moment a track is replaced, and they cannot be interpolated
  * — a director choosing "the calmest track that still has motion" needs numbers.
  */
+/**
+ * Normalisation ranges, taken from the corpus rather than guessed.
+ *
+ * The first version divided each feature by a hand-picked constant, and one of
+ * them was catastrophically wrong: onsetRate was divided by 1.6 when the actual
+ * median across 2091 segments is 11.06 and the maximum is 27.5. **99.3% of
+ * segments saturated it**, which pinned `motion` at 1.0 everywhere and silently
+ * deleted the (1 - motion) term from drift, conceal and awe while maxing it in
+ * pursuit. Four of the five roles were being computed with a dead term, and the
+ * symptom was a "missing music" gap that was really a measurement bug — drift
+ * went from 24 usable windows to 388 on the same audio once this was fixed.
+ *
+ * p05..p95 rather than min..max so a single outlying window cannot compress the
+ * scale for everything else.
+ */
+export const NORM = {
+  onsetRate:   [0.88, 18.22],
+  flux:        [0.086, 0.223],
+  centroidHz:  [321.0, 1555.5],
+  lowRatio:    [0.183, 0.780],
+  highRatio:   [0.012, 0.182],
+  crest:       [7.99, 15.20],
+  quietFrac:   [0.0, 0.351],
+  stereoWidth: [0.184, 0.745],
+};
+
+const nz = (k, v) => {
+  const [lo, hi] = NORM[k];
+  return hi - lo < 1e-9 ? 0 : Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
+};
+
 export function scoreRoles(f) {
-  const dark = 1 - Math.min(1, f.centroidHz / 3000);
-  const motion = Math.min(1, f.onsetRate / 1.6) * 0.6 + Math.min(1, f.flux / 0.25) * 0.4;
-  const weight = Math.min(1, f.lowRatio / 0.55);
-  const air = Math.min(1, f.highRatio / 0.30);
-  const dynamic = Math.min(1, f.crest / 18);
-  const emptiness = Math.min(1, f.quietFrac / 0.30);
+  const dark = 1 - nz('centroidHz', f.centroidHz);
+  const motion = nz('onsetRate', f.onsetRate) * 0.6 + nz('flux', f.flux) * 0.4;
+  const weight = nz('lowRatio', f.lowRatio);
+  const air = nz('highRatio', f.highRatio);
+  const dynamic = nz('crest', f.crest);
+  const emptiness = nz('quietFrac', f.quietFrac);
+  const width = nz('stereoWidth', f.stereoWidth);
+  const still = 1 - motion;
 
   return {
     // Long, dark, still, and with room in it.
-    drift: +(dark * 0.35 + (1 - motion) * 0.35 + emptiness * 0.15 + weight * 0.15).toFixed(3),
+    drift: +(dark * 0.30 + still * 0.40 + emptiness * 0.15 + weight * 0.15).toFixed(3),
     // Something is out there. Dark and heavy but with movement underneath.
-    unease: +(dark * 0.30 + motion * 0.30 + weight * 0.25 + (1 - air) * 0.15).toFixed(3),
-    // It knows. Loud, moving, bright enough to cut through.
-    pursuit: +(motion * 0.45 + air * 0.20 + (1 - emptiness) * 0.20 + (1 - dark) * 0.15).toFixed(3),
+    unease: +(dark * 0.28 + motion * 0.32 + weight * 0.25 + (1 - air) * 0.15).toFixed(3),
+    // It knows. Moving, bright enough to cut through, and never empty.
+    pursuit: +(motion * 0.45 + air * 0.18 + (1 - emptiness) * 0.22 + (1 - dark) * 0.15).toFixed(3),
     // Held breath. The quietest material, used where most games get louder.
-    conceal: +(emptiness * 0.45 + (1 - motion) * 0.35 + dark * 0.20).toFixed(3),
-    // Scale. Wide, airy, dynamic — for the moments the game wants awe.
-    awe: +(air * 0.30 + dynamic * 0.25 + Math.min(1, f.stereoWidth / 0.6) * 0.25 + (1 - motion) * 0.20).toFixed(3),
+    conceal: +(emptiness * 0.45 + still * 0.35 + dark * 0.20).toFixed(3),
+    // Scale. Wide, airy, dynamic — the moments the game exists for.
+    awe: +(air * 0.30 + dynamic * 0.22 + width * 0.26 + still * 0.22).toFixed(3),
   };
 }
 

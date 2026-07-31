@@ -38,7 +38,7 @@
 // frames happened to precede it is not evidence of anything.
 
 import * as THREE from 'three';
-import { makeShapeVolume, makeDetailVolume, makeWeatherMap, sample2D, sample3D } from './noise.js';
+import { makeShapeVolume, makeDetailVolume, makeWeatherMap, makeBlueNoiseTile, sample2D, sample3D } from './noise.js';
 import { FULLSCREEN_VERT, MARCH_FRAG, COMPOSITE_FRAG, PROBE_FRAG } from './shaders/cloud.glsl.js';
 import { clamp, clamp01, lerp, smoothstep } from '../core/math.js';
 import { seedFrom } from '../core/rng.js';
@@ -91,10 +91,10 @@ const WIND = {
  * the depth reconstruction is happiest with.
  */
 export const CLOUD_QUALITY = {
-  low:    { scale: 0.42, steps: 120, lightSteps: 3, msOctaves: 2, maxDist: 15000, minStep: 34, growth: 0.055, maxStep: 340, coarseMin: 110, tauCap: 1.1, softK: 0.0030, detailFade: [200, 800] },
-  medium: { scale: 0.50, steps: 176, lightSteps: 4, msOctaves: 3, maxDist: 19000, minStep: 24, growth: 0.040, maxStep: 300, coarseMin: 80,  tauCap: 0.9, softK: 0.0026, detailFade: [350, 1300] },
-  high:   { scale: 0.50, steps: 256, lightSteps: 6, msOctaves: 3, maxDist: 24000, minStep: 16, growth: 0.030, maxStep: 260, coarseMin: 55,  tauCap: 0.7, softK: 0.0022, detailFade: [500, 2000] },
-  ultra:  { scale: 0.66, steps: 384, lightSteps: 8, msOctaves: 3, maxDist: 30000, minStep: 10, growth: 0.022, maxStep: 220, coarseMin: 36,  tauCap: 0.5, softK: 0.0018, detailFade: [800, 3200] },
+  low:    { scale: 0.42, steps: 120, lightSteps: 3, msOctaves: 2, maxDist: 15000, minStep: 26, growth: 0.055, maxStep: 240, coarseMin: 110, coarseMax: 260, tauCap: 0.45, softK: 0.0044, detailFade: [200, 800] },
+  medium: { scale: 0.50, steps: 176, lightSteps: 5, msOctaves: 3, maxDist: 19000, minStep: 19, growth: 0.040, maxStep: 175, coarseMin: 80,  coarseMax: 220, tauCap: 0.34, softK: 0.0036, detailFade: [350, 1300] },
+  high:   { scale: 0.50, steps: 256, lightSteps: 7, msOctaves: 3, maxDist: 24000, minStep: 13, growth: 0.030, maxStep: 130, coarseMin: 55,  coarseMax: 175, tauCap: 0.24, softK: 0.0030, detailFade: [500, 2000] },
+  ultra:  { scale: 0.66, steps: 384, lightSteps: 8, msOctaves: 3, maxDist: 30000, minStep: 9,  growth: 0.022, maxStep: 95,  coarseMin: 36,  coarseMax: 130, tauCap: 0.20, softK: 0.0024, detailFade: [800, 3200] },
 };
 
 /**
@@ -159,6 +159,7 @@ export class CloudSystem {
     this.shape = makeShapeVolume({ size: shapeSize, seed: s });
     this.detail = makeDetailVolume({ size: detailSize, seed: s ^ 0x5bf03635 });
     this.weather = makeWeatherMap({ size: weatherSize, seed: s ^ 0x1b56c4e9 });
+    this.blue = makeBlueNoiseTile({ size: 64, seed: s ^ 0x2f7a1d05 });
     this.buildMs = performance.now() - t0;
 
     this.time = 0;
@@ -255,6 +256,17 @@ export class CloudSystem {
     w.wrapS = w.wrapT = THREE.RepeatWrapping;
     w.needsUpdate = true;
     this.weatherTex = w;
+
+    // Nearest, always. A blue-noise mask is a set of specific values at specific
+    // pixels; interpolating between them averages the pattern back into
+    // something with low-frequency energy, which is the one property it exists
+    // to not have.
+    const b = new THREE.DataTexture(this.blue.data, this.blue.size, this.blue.size, THREE.RGBAFormat, THREE.UnsignedByteType);
+    b.minFilter = THREE.NearestFilter;
+    b.magFilter = THREE.NearestFilter;
+    b.wrapS = b.wrapT = THREE.RepeatWrapping;
+    b.needsUpdate = true;
+    this.blueTex = b;
   }
 
   _buildPasses(renderer, quality) {
@@ -293,6 +305,7 @@ export class CloudSystem {
       uStepRange: { value: new THREE.Vector4(10, 0.03, 260, 45) },
       uSoftK: { value: 0.0021 },
       uTauCap: { value: 0.8 },
+      uCoarseMax: { value: 180 },
       uDetailFade: { value: new THREE.Vector2(700, 3400) },
       uSunDir: { value: this.sun.clone() },
       uSunColor: { value: c3(P.sun) },
@@ -308,6 +321,7 @@ export class CloudSystem {
       uLightFar: { value: 2400 },
       uStormPos: { value: [new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4()] },
       uStormCol: { value: [new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4()] },
+      uBlueNoise: { value: this.blueTex },
     };
 
     this.compositeUniforms = {
@@ -327,6 +341,7 @@ export class CloudSystem {
       uSkyGround: { value: c3(P.skyGround) },
       uHazeColor: this.marchUniforms.uHazeColor,
       uAerialK: this.marchUniforms.uAerialK,
+      uBlueNoise: { value: this.blueTex },
       uExposure: { value: 1 },
       uDitherPhase: { value: 0 },
     };
@@ -374,6 +389,7 @@ export class CloudSystem {
     this.marchUniforms.uStepRange.value.set(q.minStep, q.growth, q.maxStep, q.coarseMin);
     this.marchUniforms.uSoftK.value = q.softK;
     this.marchUniforms.uTauCap.value = q.tauCap;
+    this.marchUniforms.uCoarseMax.value = q.coarseMax;
     this.marchUniforms.uDetailFade.value.set(q.detailFade[0], q.detailFade[1]);
     this._targetsDirty = true;
     return this;
@@ -540,7 +556,10 @@ export class CloudSystem {
       s.x = c.x;
       s.z = c.z;
       s.y = CLOUD.LAYER_BASE + CLOUD.LAYER_THICKNESS * (0.22 + c.h * 0.24);
-      s.radius = 900 + c.charge * 1500;
+      // Tight. An electrical cell lights the cloud it is inside and a rim of
+      // the ones next to it; a wide falloff turns a strike into a full-screen
+      // flash that erases every silhouette the player was reading.
+      s.radius = 480 + c.charge * 620;
       s.charge = c.charge;
 
       // A stroke is a fast rise and a decaying flicker, not a square pulse. The
@@ -555,7 +574,7 @@ export class CloudSystem {
         if (stroke < 0) stroke = 0;
       }
       const ember = 0.10 + 0.06 * Math.sin(t * 0.7 + c.h * 9.0);
-      s.intensity = (ember + stroke * 5.4) * c.charge;
+      s.intensity = (ember * 0.55 + stroke * 2.6) * c.charge;
       const mixF = clamp01(stroke * 2.2);
       s.r = lerp(P.stormEmber[0], P.stormFlash[0], mixF);
       s.g = lerp(P.stormEmber[1], P.stormFlash[1], mixF);
@@ -925,6 +944,10 @@ export class CloudSystem {
   }
 
   async _drainGpuQueries(gl) {
+    // Without this the results never arrive. The commands are sitting in a queue
+    // the driver has not been asked to submit, and polling for a result of work
+    // that has not started is a loop that only ends when the timeout does.
+    gl.flush();
     const out = [];
     for (const q of this._gpuQueries) {
       for (let i = 0; i < 400; i++) {
@@ -1035,6 +1058,7 @@ export class CloudSystem {
     this.shapeTex.dispose();
     this.detailTex.dispose();
     this.weatherTex.dispose();
+    this.blueTex.dispose();
     if (this.sceneRT) { this.sceneRT.depthTexture.dispose(); this.sceneRT.dispose(); }
     if (this.cloudRT) this.cloudRT.dispose();
     this.marchMat.dispose();

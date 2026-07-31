@@ -74,6 +74,26 @@ float vw_heightGradient(float h, float form) {
   return mix(a, tower, clamp(form * 2.0 - 1.0, 0.0, 1.0));
 }
 
+// Conservative emptiness test for the empty-space search.
+//
+// Substitutes the maximum possible value for the shape term and the maximum
+// possible swing of the breathing, so it can only ever over-report cloud, never
+// miss it. One texture fetch and no shape sample, and — the point of the whole
+// thing — it reads a field that varies over hundreds of metres rather than tens,
+// which is what makes a long stride safe.
+//
+// The previous version simply evaluated the full density at a point and strode
+// on. It stepped over anything smaller than its stride, and since the stride is
+// offset per pixel by the dither, the misses were different in each pixel and
+// came out as speckle across the body of every cloud. That failure is invisible
+// in a wireframe and obvious in a capture.
+bool vw_possible(vec3 p, float soft) {
+  vec4 w = vw_weather(p);
+  float cov = clamp(w.r * uCoverage.x + uCoverage.y + uBreath.z + uBreath.w, 0.0, 1.0);
+  float grad = vw_heightGradient(vw_heightFraction(p), w.g);
+  return grad > 1.0 - cov - soft * 0.5;
+}
+
 // Density at a point in cloud space, in [0, uDensityScale].
 //
 // detailLod is 0 (skip the fine texture entirely) to 1 (full erosion). The
@@ -161,6 +181,7 @@ uniform vec4  uStepRange;    // fine minimum, growth per metre, maximum, coarse 
 uniform vec2  uDetailFade;   // range where the fine texture fades out
 uniform float uSoftK;        // how fast field contrast falls off with step size
 uniform float uTauCap;       // most optical depth one step may cover
+uniform float uCoarseMax;    // longest stride the empty-space search may take
 
 uniform vec3  uSunDir;       // toward the sun
 uniform vec3  uSunColor;
@@ -176,6 +197,7 @@ uniform float uLightStep;
 uniform float uLightFar;
 uniform vec4  uStormPos[4];  // xyz cloud space, w = 1/radius
 uniform vec4  uStormCol[4];  // rgb colour, a intensity
+uniform sampler2D uBlueNoise;
 
 ${FIELD_GLSL}
 
@@ -189,12 +211,13 @@ float vw_hg(float c, float g) {
   return (1.0 - g2) / pow(1.0 + g2 - 2.0 * g * c, 1.5);
 }
 
-// Interleaved gradient noise. A blue-noise tile would dither marginally better,
-// but it costs a texture fetch per pixel and a load-time generation pass, and
-// after the bilateral upsample the difference is not measurable. This is one
-// multiply-add.
-float vw_ign(vec2 p) {
-  return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+// Per-pixel dither value from the tiling blue-noise mask. See noise.js for why
+// this is a texture fetch rather than the usual one-line interleaved gradient
+// noise: without temporal accumulation, IGN's mid-frequency structure survives
+// the upsample as a visible weave and blue noise does not.
+float vw_blue(vec2 p) {
+  ivec2 sz = textureSize(uBlueNoise, 0);
+  return texelFetch(uBlueNoise, ivec2(p) % sz, 0).r;
 }
 
 const vec3 VW_CONE[8] = vec3[8](
@@ -305,8 +328,8 @@ void main() {
   // recognisable artefact of a cheap volumetric, and the one that survives a
   // screenshot. It has to be reapplied after the empty-space search too, or the
   // refined march starts on a quantised grid and the cloud gains flat faces.
-  float jit = fract(vw_ign(gl_FragCoord.xy) + uJitter);
-  float t = t0 + max(uStepRange.w, t0 * uStepRange.y * 2.5) * jit;
+  float jit = fract(vw_blue(gl_FragCoord.xy) + uJitter);
+  float t = t0 + clamp(t0 * uStepRange.y * 2.5, uStepRange.w, uCoarseMax) * jit;
 
   bool coarse = true;
   int miss = 0;
@@ -335,10 +358,11 @@ void main() {
       // of the loop's steps, and the ray then ran out of budget somewhere inside
       // the first cloud — which is not a subtle failure: transmittance stops
       // wherever the counter did, and since the start offset is dithered per
-      // pixel, the cloud fills with dots.
-      float dc = max(uStepRange.w, t * uStepRange.y * 2.5);
-      float d = vw_density(p, 0.0, soft, h, w);
-      if (d > 0.0) { coarse = false; miss = 0; t = max(t0, t - dc * (1.0 - jit * 0.9)); }
+      // pixel, the cloud fills with dots. The upper bound is the other half of
+      // it: the conservative test is smooth over a few hundred metres and no
+      // further, so the stride cannot be allowed past that either.
+      float dc = clamp(t * uStepRange.y * 2.5, uStepRange.w, uCoarseMax);
+      if (vw_possible(p, soft)) { coarse = false; miss = 0; t = max(t0, t - dc * (1.0 - jit * 0.9)); }
       else t += dc;
       continue;
     }
@@ -347,9 +371,16 @@ void main() {
     float d = vw_density(p, lod, soft, h, w);
 
     if (d <= 0.0) {
-      // Do not go back to coarse immediately: the inside of a cloud is full of
-      // small holes, and bouncing between modes costs more than walking through.
-      if (++miss > 4) coarse = true;
+      // Do not go back to the search immediately: the inside of a cloud is full
+      // of small holes, and bouncing between modes costs more than walking
+      // through. And when it does hand back, the conservative test has to agree
+      // there is nothing here — otherwise the search says "possible", rewinds a
+      // stride, and the two trade the ray back and forth over the same hundred
+      // metres until the step budget is gone.
+      if (++miss > 4) {
+        miss = 0;
+        if (!vw_possible(p, soft)) coarse = true;
+      }
       t += ds;
       continue;
     }
@@ -367,7 +398,13 @@ void main() {
     // it reaches the far side. Exhausting the loop is not a graceful failure —
     // the march stops at whatever transmittance the counter reached, and because
     // the start offset is dithered per pixel, the cloud fills with stipple.
-    float grow = 1.0 + (1.0 - trans) * 2.5;
+    // Hold the step short until the pixel is largely decided, then let it go.
+    // The first step into a cloud writes most of that pixel's colour: if it is
+    // allowed to cover much optical depth, its exact position matters, and since
+    // that position is dithered per pixel the lit face of every cloud picks up a
+    // woven stipple. Past about a quarter transmittance nothing further is
+    // visible and the step can grow without anyone seeing it.
+    float grow = 1.0 + smoothstep(0.75, 0.15, trans) * 3.5;
     ds = min(ds * grow, uTauCap * grow / (uSigmaT * d));
 
     float lightDepth = vw_lightMarch(p, soft);
@@ -431,8 +468,11 @@ uniform float uAerialK;
 uniform float uExposure;
 uniform float uDitherPhase;
 
-float vw_ign(vec2 p) {
-  return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+uniform sampler2D uBlueNoise;
+
+float vw_blue(vec2 p) {
+  ivec2 sz = textureSize(uBlueNoise, 0);
+  return texelFetch(uBlueNoise, ivec2(p) % sz, 0).r;
 }
 
 float vw_linearDist(ivec2 px, float cosA) {
@@ -530,7 +570,7 @@ void main() {
   // Dither before the 8-bit write. A sky this smooth bands into visible steps
   // otherwise, and the banding is worse than the noise it replaces by a wide
   // margin.
-  col += (vw_ign(gl_FragCoord.xy + uDitherPhase) - 0.5) * (1.0 / 255.0);
+  col += (fract(vw_blue(gl_FragCoord.xy) + uDitherPhase) - 0.5) * (1.0 / 255.0);
 
   fragColor = vec4(col, 1.0);
 }

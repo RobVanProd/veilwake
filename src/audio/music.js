@@ -94,6 +94,94 @@ export function gainFor(s) {
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
+/**
+ * The layer beds.
+ *
+ * Three short loops — a sub-bass pressure floor, a ship-mechanics layer, and a
+ * high/wide air layer — authored deliberately thin so they can stack over any
+ * cue. This is what recovers most of what stems would have given us: the score
+ * arrived as finished mixes, which can only be crossfaded, but a thin bed in the
+ * same key and tempo can be *added* to whatever is already playing.
+ *
+ * Each answers to a different part of the game state, and none of them is
+ * "music" in the sense the cues are — they are closer to the world having a
+ * sound. That is why they are mixed separately and are not part of the segment
+ * selection at all.
+ */
+export class BedLayers {
+  constructor(audio, { manifest = null } = {}) {
+    this.audio = audio;
+    this.beds = manifest || {
+      // Several variants of each so a long session does not expose the loop.
+      floor:   ['assets/music/beds/bed_floor_01.mp3', 'assets/music/beds/bed_floor_02.mp3'],
+      machine: ['assets/music/beds/bed_machine_01.mp3', 'assets/music/beds/bed_machine_02.mp3',
+                'assets/music/beds/bed_machine_03.mp3', 'assets/music/beds/bed_machine_04.mp3'],
+      air:     ['assets/music/beds/bed_air_01.mp3', 'assets/music/beds/bed_air_02.mp3',
+                'assets/music/beds/bed_air_03.mp3', 'assets/music/beds/bed_air_04.mp3'],
+    };
+    this.voices = {};
+    this.started = false;
+  }
+
+  start(rng = null) {
+    if (this.started || !this.audio.started) return;
+    const ctx = this.audio.ctx;
+    for (const [kind, list] of Object.entries(this.beds)) {
+      const pick = list[rng ? rng.int(0, list.length - 1) : Math.floor(Math.random() * list.length)];
+      const el = new Audio(pick);
+      el.loop = true;
+      el.crossOrigin = 'anonymous';
+      const src = ctx.createMediaElementSource(el);
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+      // A gentle lowpass on the floor keeps it from fighting the cues for the
+      // same low midrange, which is where the creature calls have to live.
+      const filt = ctx.createBiquadFilter();
+      filt.type = kind === 'air' ? 'highpass' : 'lowpass';
+      filt.frequency.value = kind === 'air' ? 500 : (kind === 'floor' ? 220 : 4000);
+      src.connect(filt); filt.connect(gain);
+      gain.connect(this.audio.buses.music || this.audio.master);
+      el.play().catch(() => {});
+      this.voices[kind] = { el, gain, filt };
+    }
+    this.started = true;
+  }
+
+  /**
+   * Beds follow the world, not the threat model.
+   *
+   * The floor is the medium itself and is always present, rising with depth and
+   * pressure. The machine layer is the ship and follows what the player is
+   * doing to it, so cutting the engines genuinely thins the mix — the silence of
+   * concealment is partly the ship going quiet. Air follows altitude and wonder,
+   * and is the only bed that reaches for height.
+   */
+  update(s, dt) {
+    if (!this.started) { this.start(); if (!this.started) return; }
+    const t = this.audio.ctx.currentTime;
+    const set = (kind, v, tau = 0.9) => {
+      const voice = this.voices[kind];
+      if (voice) voice.gain.gain.setTargetAtTime(Math.max(0, v), t, tau);
+    };
+    const c01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
+
+    set('floor', 0.10 + c01(s.depth ?? 0.4) * 0.22 + c01(s.certainty ?? 0) * 0.10);
+    // Falls away with the engines. This is what makes drifting audibly different
+    // from flying slowly, which the signature system needs the player to feel.
+    set('machine', c01(s.shipActivity ?? 0) * 0.26 + c01(s.damage ?? 0) * 0.14, 0.5);
+    set('air', c01(s.wonder ?? 0) * 0.30 + c01(s.altitude ?? 0) * 0.12);
+  }
+
+  stop(fade = 1.5) {
+    const t = this.audio.ctx ? this.audio.ctx.currentTime : 0;
+    for (const v of Object.values(this.voices)) {
+      v.gain.gain.setTargetAtTime(0, t, fade / 3);
+      setTimeout(() => v.el.pause(), (fade + 0.3) * 1000);
+    }
+    this.started = false;
+  }
+}
+
 export class MusicDirector {
   /**
    * @param {import('../core/audio.js').Audio} audio
