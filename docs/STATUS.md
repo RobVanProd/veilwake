@@ -10,7 +10,7 @@ however good it is. That distinction has already cost this project real time
 twice — the cockpit and all four creature bodies were each reported finished
 while being unreachable from the running game.
 
-Last updated: after the creature bodies landed.
+Last updated: after audio, menus and the cockpit upgrade landed.
 
 ---
 
@@ -21,9 +21,9 @@ Last updated: after the creature bodies landed.
 | **Volumetric clouds** | ✅ | The best thing in the project. GPU ray-march, multi-scatter, aerial perspective, 2.1 ms of a 7 ms budget. CPU and GPU sample the same field, proven to 0.0015. |
 | **Luminaries** | ✅ | Three coloured sources rise and set on long cycles. No sun. The whole palette derives from whichever are up. |
 | **Flight model** | ✅ | Forces not velocities, anisotropic drag, commanded-bank servo, stall. 12 control-polarity tests. |
-| **Ship camera** | ✅ | Spring-mounted with velocity feed-forward, hard self-turn cap, seven comfort options — **none of which are adjustable in-game**. |
+| **Ship camera** | ✅ | Spring-mounted with velocity feed-forward, hard self-turn cap, seven comfort options, all adjustable from Options. |
 | **Xbox controller** | ✅ | Radial deadzone, response curve, absolute-position trigger throttle, dual-rumble driven from hull state. |
-| **Cockpit** | ✅ | Real geometry, lit by the luminaries, occludes the view. Corner seams leak slightly. |
+| **Cockpit** | ✅ | Real geometry, lit by the luminaries, occludes the view. Sealed — zero uncovered corner pixels at eleven attitudes and four aspect ratios. |
 | **Ship lamps + plume** | ✅ | Registered with the cloud light registry, so they light the vapour. Cast real beams. |
 | **Signature system** | ✅ | Six channels with different clocks. Every action that helps you survive makes you louder. Anchors reproduce within 1%. |
 | **ShipSystems** | ✅ | Reactor, engine, lights, and the scan — charge tell then pulse. |
@@ -31,7 +31,12 @@ Last updated: after the creature bodies landed.
 | **Creature bodies** | ✅ | All four render, lit by the luminaries, occluded by cloud. |
 | **The vertical slice** | ✅ | Nine beats, three playstyles verified end to end: competent → ESCAPED 3.8 min, stealthy → ESCAPED 5.2 min, reckless → TAKEN 2.4 min. |
 | **Captions** | ✅ | Two registers. The game's only text. |
-| **Test suite** | ✅ | 158 passing at `/tests/`, including the art direction as a regression. |
+| **Music** | ✅ | 46 authored tracks. A director picks 8-second windows by threat model, including deliberate near-silence while hiding. Bed layers, creature voices, ducking. |
+| **Title / pause / options** | ✅ | The seven comfort settings, gamepad sensitivity and pitch-invert are adjustable now. Keyboard and pad navigable. |
+| **HUD** | ✅ | Control legend that fades, and swaps for the active device. |
+| **Signature instruments** | ✅ | Six live columns in the centre of the console, reading the real channels. |
+| **All four creatures in the slice** | ✅ | Lantern at TRACE, Listener through the middle, a Wake Hunter pack at HUNTED, a Choir on the way out. |
+| **Test suite** | ✅ | 164 passing across 8 suites, including the art direction and the whole vertical slice as regressions. |
 
 ---
 
@@ -41,14 +46,6 @@ Everything here exists in the repo and is unreachable from the running game.
 
 | Thing | State | What is missing |
 |---|---|---|
-| **Music** | ❌ **56 authored tracks, silent** | `assets/music/` holds 56 mp3s and `music_index.json` has per-segment feature analysis. `src/audio/music.js` has a MusicDirector that picks 8-second windows by threat model — including deliberate silence at 0.11 gain while hiding. **Nothing imports it. The game makes no sound at all.** |
-| **Creature voices** | ❌ | `src/audio/language.js` — synthesis for creature calls, the Listener's 24 Hz fundamental, the Lantern's tremolo. Never imported. |
-| **Audio engine** | ❌ | `src/core/audio.js` exists and is imported by nothing. There is no WebAudio graph, no gesture-gate, no buses. |
-| **Title screen** | ❌ | The game boots straight into flight. |
-| **Pause** | ❌ | No way to stop. |
-| **Options** | ❌ | The seven comfort settings, gamepad sensitivity and pitch-invert are all implemented and all unreachable. |
-| **Death / restart UI** | ⚠️ | `director.restart()` works and `caption.js` shows a bare overlay. Not a screen. |
-| **The other three archetypes in play** | ⚠️ | Lantern, Wake Hunter and Choir are fully simulated, tested and have bodies — but the director's beats only ever spawn a Listener. |
 | **Corridor carving** | ⚠️ | `corridor.js` models the Listener's 300 m cleared corridor and the creature uses it, but the renderer does not carve, so it is invisible. |
 
 ---
@@ -57,18 +54,24 @@ Everything here exists in the repo and is unreachable from the running game.
 
 Measured, not suspected.
 
-1. **The Wake Hunter's turbulence tell renders as hard geometric dashes** across
-   the whole 150–1200 m band a pack is actually fought at. Called blocking by an
-   adversarial review.
-2. **The Choir is invisible against dark sky** — an on/off pixel diff at 2.6 km
-   with 26,619 points returned *exactly zero* changed pixels.
-3. **Bodies flatten to hard-edged cut-outs against bright cloud** — no internal
-   tone, no rim.
-4. **Dither stipple is visible in dark regions** and the stronger in-scatter made
+1. **The Wake Hunter's tell is imperceptible.** The hard dashes are gone — that
+   part is fixed and independently confirmed — but what replaced them measures
+   1.5–2.5 levels against an instrument noise floor of 1.12. Artefact-free and
+   invisible is progress, not the feature. Two causes were identified: the
+   disturbance is drawn behind the whole cloud column and multiplied by its
+   transmittance (measured 0.002–0.08), so most of the amplitude is spent before
+   it reaches the eye.
+2. **Dither stipple is visible in dark regions** and the stronger in-scatter made
    it worse. The cause is in the density march's running transmittance, not the
    lighting.
-5. **The Choir draws 26k–34k points** against a budget line of 4,000.
-6. **Cockpit corner seams leak** slightly at some attitudes.
+3. **The Choir's interior is thin.** Bringing the point count inside budget cost
+   density from the inside of the shoal — 0.25% of frame at 4,033 points.
+4. **The Listener's flank vanes read as pale lobes** stuck on the body rather
+   than tissue continuous with it.
+5. **The first ~90 seconds of a run are near-black** (mean luminance 32/255 at
+   t=45 s) before the weather opens up.
+6. **`wonder` is never derived**, so the score's "awe" role is unreachable in
+   normal play. It needs a real vista signal from the director.
 
 ---
 

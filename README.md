@@ -101,9 +101,13 @@ explicitly, so any image in the gallery reproduces byte-for-byte.
 
 ## Status
 
-158 tests passing. The volumetric pass runs at 2.1 ms against a 7 ms budget.
+164 tests passing across eight suites — including the art direction and the whole
+vertical slice, both as regressions. The volumetric pass runs at 1.8 ms against a
+7 ms budget.
 
-The music is written, measured and **silent** — 56 authored tracks and a director
-that chooses between them, connected to nothing. There is no title screen and no
-pause. [`docs/STATUS.md`](docs/STATUS.md) is the honest inventory, including the
-measured defects.
+It has a title screen, a pause, options, a score of 46 authored tracks chosen by
+threat model, four creatures with bodies, and an ending you can lose.
+
+[`docs/STATUS.md`](docs/STATUS.md) is the honest inventory — what a player can
+reach, what is still only written down, and six defects with the measurements
+behind them.
