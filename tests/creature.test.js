@@ -373,13 +373,39 @@ test('§5.3 two creatures forked from one parent do not share a mistake sequence
   const parent = new Rng(seedFrom('shared'));
   const a = new Probe({ rng: parent, falsePositiveBase: 0.5 });
   const b = new Probe({ rng: parent, falsePositiveBase: 0.5 });
-  let same = 0;
-  for (let i = 0; i < 2000; i++) {
-    if (!!a.rollFalsePositive(0, 0, 0.1, 'acoustic') === !!b.rollFalsePositive(0, 0, 0.1, 'acoustic')) same++;
+  const N = 2000;
+  let same = 0, fa = 0, fb = 0;
+  for (let i = 0; i < N; i++) {
+    const x = !!a.rollFalsePositive(0, 0, 0.1, 'acoustic');
+    const y = !!b.rollFalsePositive(0, 0, 0.1, 'acoustic');
+    if (x === y) same++;
+    if (x) fa++; if (y) fb++;
   }
-  // Independent streams agree by chance about 50% of the time; a shared stream
-  // agrees 100% of the time.
-  return { ok: same < 1800, detail: `${same}/2000 draws agreed (identical streams would be 2000)` };
+  // Compare against what INDEPENDENT streams actually score, computed from the
+  // observed rate rather than assumed.
+  //
+  // The old version asserted `same < 1800` on the reasoning that "independent
+  // streams agree about 50% of the time". That is only true at p = 0.5. The real
+  // rate here is falsePositiveBase * SENSE_DT = 0.5 * 0.1 = 0.05, at which two
+  // independent streams agree p^2 + (1-p)^2 = 90.5% of the time — 1810 of 2000,
+  // ABOVE the threshold. The test could not pass however good the generator was,
+  // and it spent a long time looking like a real defect.
+  //
+  // It also pointed at one. `Rng.fork` seeded new streams by XORing a tag into a
+  // raw xorshift32 output, and xorshift32 is linear over GF(2), so forked
+  // streams stayed linearly related: measured directly at p = 0.5 they agreed on
+  // 1826 of 2000 draws against an expected 1000. That is fixed in rng.js, and
+  // this test is the wrong instrument to see it with — at p = 0.05 the signal is
+  // buried, which is why it barely moved when the bug was removed.
+  const p = (fa + fb) / (2 * N);
+  const expected = N * (p * p + (1 - p) * (1 - p));
+  const sd = Math.sqrt(N * (p * p + (1 - p) * (1 - p)) * (1 - (p * p + (1 - p) * (1 - p))));
+  const z = (same - expected) / Math.max(sd, 1e-9);
+  return {
+    ok: Math.abs(z) < 4,
+    detail: `${same}/${N} agreed; independent streams at the observed rate ${p.toFixed(3)} `
+      + `expect ${expected.toFixed(0)} +/- ${sd.toFixed(0)} (z = ${z.toFixed(2)})`,
+  };
 });
 
 // ---------------------------------------------------------------------------
