@@ -141,6 +141,62 @@ export const LISTENER = {
   stopSeconds: 2.0,
 
   patrolRadiusM: 3000,
+
+  /**
+   * It sinks toward the vapour.
+   *
+   * [chosen, forced by measurement]. Everything above describes an animal that
+   * moves in a horizontal plane at whatever altitude it was spawned at. Played
+   * end to end, that produced a Listener which carved seven corridor segments in
+   * a whole run with every single one of them in air of exactly zero density: it
+   * patrolled above a cloud band it never entered, so §10.1's corridor was cut
+   * through nothing, and a player who flew down its throat would have seen
+   * clear sky. §2.3's duct test and §10.1's "it carves because it is enormous"
+   * both quietly assume the creature is in a medium with something in it.
+   *
+   * TWO PROBES, NOT FIVE. The first version of this also leaned the heading
+   * toward whichever side of the nose was thicker, which sounded better and did
+   * nothing: swept over a 3.3x range of probe distance and 1.7x of bias, the
+   * carved-segment density came back identical to three decimal places every
+   * time. The reason is that the horizontal gradient is almost always exactly
+   * zero — the creature spends most of its patrol in open air where both probes
+   * read 0 and the lean has nothing to lean on. The vertical gradient is
+   * reliable in a way the horizontal one is not, because the cloud is a *layer*:
+   * there is nearly always more of it below than above. Measured over six
+   * patrols from different seeds and altitudes, the fraction of carved corridor
+   * lying in real vapour went 0.30 -> 0.73 and its mean density 0.094 -> 0.335.
+   * The inert term is gone rather than kept as decoration.
+   *
+   * THE PROBE REACHES AS FAR AS THE CREATURE MAY MOVE. A single pair at ±400 m
+   * worked from just above a deck and failed completely from 900 m above one:
+   * both probes read zero, the gradient was zero, and it hung there forever with
+   * the cloud in plain sight below it. A gradient follow whose reach is shorter
+   * than its own freedom of movement has a blind region exactly where it is most
+   * needed. So the ladder spans the whole band, and the far rungs are what find
+   * a deck the near ones cannot see.
+   *
+   * `climbMps` is half of patrol speed, so it is always a drift and never a
+   * manoeuvre — a 240 m body porpoising would break the staging rule that it
+   * never stops reading as enormous. At 2.5 m/s it takes a minute and a half to
+   * move its own body height.
+   */
+  vapour: {
+    /**
+     * How many samples to take above, and the same number below.
+     *
+     * An integral over the column, not a pair of point probes. Point pairs were
+     * the second version and they are brittle in exactly the case that matters:
+     * aimed at a deck a few hundred metres thick, a single rung sits on or just
+     * outside it, and one tick of descent drops it out the bottom and collapses
+     * the gradient to zero — the creature stalls halfway into the cloud it was
+     * trying to reach. Summing the column asks the question that is actually
+     * meaningful, "is there more vapour below me than above me", and no single
+     * sample can answer it wrongly.
+     */
+    rungs: 4,
+    climbMps: 300 / 60 / 2,
+    bandM: 1400,          // it will not stray further than this from home altitude
+  },
 };
 
 const TAU = Math.PI * 2;
@@ -206,6 +262,13 @@ export class Listener extends Creature {
     this._local = makeMediumSample();
     this._lastBearing = null;
     this._sweepPhase = 0;
+
+    // Which way the vapour thickens, refreshed at the sense rate and applied
+    // every step. Stays zero in a medium with no structure, which is what the
+    // contract tests fly it through, so a flat world produces exactly the old
+    // behaviour.
+    this._vapourClimb = 0;
+    this._probe = makeMediumSample();
   }
 
   _draw([lo, hi]) {
@@ -245,6 +308,11 @@ export class Listener extends Creature {
     out.length = 0;
 
     const medium = ctx.medium;
+    // Before the signature check, and outside it: where the vapour lies is not a
+    // percept and does not depend on there being anything to hear. A Listener in
+    // a world with no ship in it still lives in the cloud.
+    if (medium) this._readVapour(medium, ctx.t);
+
     const sig = ctx.signature;
     if (!medium || !sig) return out;
 
@@ -414,8 +482,24 @@ export class Listener extends Creature {
 
     const dir = azimuthDir(this.heading);
     this.velocity.x = dir.x * this.speed;
-    this.velocity.y = 0;
     this.velocity.z = dir.z * this.speed;
+
+    // The vertical drift toward thicker air. Held while TRACKING or COMMITTED:
+    // once it has a bearing it commits to it, and letting the altitude wander
+    // during a chase would change the closing geometry the slice was measured
+    // against for a reason that has nothing to do with the chase. It is also
+    // truer — an animal converging on something it can hear is not shopping for
+    // better weather.
+    const seeking = state !== STATE.TRACKING && state !== STATE.COMMITTED;
+    this.velocity.y = seeking && this.speed > 1e-3 ? this._vapourClimb : 0;
+    if (this.velocity.y !== 0) {
+      // Bounded around where it started, so a long patrol in a thinning sky
+      // cannot walk it out of the layer and out of the story.
+      const B = LISTENER.vapour.bandM;
+      const y = this.position.y + this.velocity.y * dt;
+      this.position.y = clamp(y, this.home.y - B, this.home.y + B);
+    }
+
     this.position.x += this.velocity.x * dt;
     this.position.z += this.velocity.z * dt;
 
@@ -426,6 +510,51 @@ export class Listener extends Creature {
     const carvingNow = this.carving && !this.listening && state !== STATE.ALERT && this.speed > 0.5;
     if (carvingNow) this.corridor.carve(this.position.x, this.position.y, this.position.z, t);
     else this.corridor.lift();
+  }
+
+  /**
+   * Two density probes, turned into a drift.
+   *
+   * Deliberately a local gradient rather than a search for the thickest cloud in
+   * the sector. A creature that navigated to the best weather would be solving a
+   * problem, and the player would eventually read it as pathfinding; one that
+   * sinks because there is more vapour below it than above is just an animal
+   * that lives in the cloud, and it produces the same corridors without anything
+   * being planned. It also cannot get stuck steering at a mass that has blown
+   * away, because there is no target — the field moves, the drift follows.
+   *
+   * Eight samples at the sense rate against §8's budget of 32 per tick;
+   * `sense()` already spends nine.
+   *
+   * Normalised by how much vapour it found in total, not by how many samples it
+   * took. The difference of the two column *means* was the third version and it
+   * was uselessly timid: a deck that only one of four rungs could see produced
+   * 15% of the drift rate, so from 900 m up the creature spent a quarter of an
+   * hour not arriving. Dividing by the total instead asks the directional
+   * question — "of the vapour I can find, how much of it is below me" — which
+   * saturates at 1 when all of it is, however little that is. Faint distant
+   * cloud is still unambiguously *down*.
+   *
+   * Both columns are the same length and sampled at the same offsets, which is
+   * what makes air of uniform density cancel to exactly zero; the guard on the
+   * denominator makes uniformly empty air do the same rather than divide by it.
+   * Those two cases are the flat media the contract tests fly through.
+   */
+  _readVapour(medium, t) {
+    const V = LISTENER.vapour;
+    const p = this.position;
+    const d = (y) => medium.sample(p.x, y, p.z, t, this._probe).density;
+
+    let above = 0, below = 0;
+    for (let i = 1; i <= V.rungs; i++) {
+      const dy = (i / V.rungs) * V.bandM;
+      above += d(p.y + dy);
+      below += d(p.y - dy);
+    }
+    const total = above + below;
+    this._vapourClimb = total > 1e-4
+      ? clamp((above - below) / total, -1, 1) * V.climbMps
+      : 0;
   }
 
   /**

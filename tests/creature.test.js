@@ -854,6 +854,76 @@ test('§10.1 the corridor is the place a call carries — measured in dB at 6 km
   };
 });
 
+// A layered sky: cloud below `top`, empty above it. Enough structure for the
+// vertical probe to have an answer, and nothing else.
+//
+// A real deck with a top AND a bottom, so "sinks toward the vapour" has somewhere
+// to settle and the test can tell drifting from falling.
+//
+// The first version put a 500 m slab at [100, 600] and started the creature at
+// 1500 — exactly `bandM` above the slab's underside — so a probe landed on the
+// boundary and one tick of descent moved it outside and zeroed the reading. That
+// was a fixture accident rather than a defect, but chasing it is why
+// `_readVapour` integrates a column instead of sampling isolated rungs.
+function layeredMedium(top = 600, thickness = 450) {
+  const bottom = top - thickness;
+  return createMedium({
+    field: { shapeAdvect: [0, 0, 0] },
+    densityAt: (x, y) => (y <= top && y >= bottom ? 0.6 : 0),
+    flowAt: (x, y, z, out = {}) => { out.x = 0; out.y = 0; out.z = 0; out.turbulence = 0; return out; },
+  });
+}
+
+test('§10.1 it sinks into the vapour, so the corridor is cut through something', () => {
+  // Started 900 m above a cloud deck it would historically have patrolled over
+  // forever: velocity.y was hard-zero and altitude was whatever it spawned at.
+  const l = makeListener({ seed: 'sink', position: vec(0, 1500, 0) });
+  l.simLevel = 'full';
+  l.carving = true;
+  scriptedWorld({
+    seconds: 600, creatures: [l], medium: layeredMedium(600, 450),
+    shipPosAt: () => vec(0, 200, 90000), acousticAt: () => 0,
+  });
+  return {
+    ok: l.position.y <= 600 && l.corridor.liveCount() > 0,
+    detail: `started at 1500 m over a deck topping out at 600 m, ended at ` +
+      `${f(l.position.y, 0)} m with ${l.corridor.liveCount()} live segments`,
+  };
+});
+
+test('§10.1 the drift is a drift: it never porpoises, and it stays near home', () => {
+  const l = makeListener({ seed: 'drift', position: vec(0, 1500, 0) });
+  l.simLevel = 'full';
+  let worstClimb = 0;
+  scriptedWorld({
+    seconds: 600, creatures: [l], medium: layeredMedium(600, 450),
+    shipPosAt: () => vec(0, 200, 90000), acousticAt: () => 0,
+    onStep: () => { worstClimb = Math.max(worstClimb, Math.abs(l.velocity.y)); },
+  });
+  // Half of patrol speed is the cap, and it must stay inside the band around
+  // the altitude it was placed at — a creature that could sink indefinitely
+  // would eventually leave the layer and the story.
+  const cap = LISTENER.vapour.climbMps;
+  return {
+    ok: worstClimb <= cap + 1e-6 && Math.abs(l.position.y - 1500) <= LISTENER.vapour.bandM,
+    detail: `peak vertical ${f(worstClimb, 2)} m/s against a ${f(cap, 2)} cap, ` +
+      `ended ${f(Math.abs(l.position.y - 1500), 0)} m from home (band ${LISTENER.vapour.bandM} m)`,
+  };
+});
+
+test('in air with no structure the drift is exactly zero, so a flat world is unchanged', () => {
+  const l = makeListener({ seed: 'flatworld', position: vec(0, 900, 0) });
+  l.simLevel = 'full';
+  scriptedWorld({
+    seconds: 120, creatures: [l], medium: createFlatMedium({ density: 0.4 }),
+    shipPosAt: () => vec(0, 200, 90000), acousticAt: () => 0,
+  });
+  return {
+    ok: l.position.y === 900 && l.velocity.y === 0,
+    detail: `uniform density 0.4: altitude ${f(l.position.y, 1)} m, vertical ${f(l.velocity.y, 3)} m/s`,
+  };
+});
+
 // The default is false so a creature under test does not reshape the medium it
 // is being measured in — every assertion above this one about ducts, spreading
 // and transmission would otherwise be measuring a world the Listener had already

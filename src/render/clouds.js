@@ -279,8 +279,39 @@ export class CloudSystem {
     // is lit, and the frame goes to featureless dark fog with the palette
     // inverted. The original comment was right that clear air between masses is
     // what makes them monumental — it just had the number one notch too low.
+    //
+    // That sweep moved `gain`, and stopping there left `bias` carrying a problem
+    // nobody had measured. `coverage = clamp01(W*gain + bias)`, so at -1.58 a
+    // column produced no cloud at all unless W > 0.608 — and W is roughly
+    // uniform, so 65.6% of the world was EXACTLY zero, median coverage 0, mean
+    // 0.133. Not sparse: absent. Three separate symptoms turned out to be this
+    // one number. The Listener carved every corridor of a full run through air
+    // of density zero. Creature bodies spent 21% of their live seconds inside
+    // any weather at all, which is why they read as models pasted on a backdrop.
+    // And concealment along the played route measured 0.00 at five of six
+    // sampled moments — in a game whose entire survival verb is hiding, there
+    // was nowhere to hide.
+    //
+    // Swept at -1.58 / -1.30 / -1.10 through the real camera across a full
+    // luminary cycle (the mood suite's own six moments, which is the only
+    // instrument here that has ever caught anything):
+    //
+    //   bias    p50 avg   dyn min   lit peak   hue max   concealment
+    //   -1.58     49.5      1.64      32.9%     0.114    0 0 0 .07 0 0
+    //   -1.10     39.9      2.13       7.8%     0.455    .02 .21 0 .56 0 0
+    //
+    // Darker, wider dynamic range, four times the hue variety, and litFrac off
+    // the ceiling it was grazing — every axis of "dark and doomy" improves, and
+    // the frame gets there by having something in it rather than by being empty.
+    // Render cost median 0.25 ms, p99 5.2 ms against an 11 ms budget: dense
+    // cloud is *cheaper* to march, because rays hit the transmittance cap and
+    // die instead of running to the far plane.
+    //
+    // It stops here rather than going further because the gain sweep's warning
+    // is still live — the clear air between masses is what makes them
+    // monumental, and at -1.10 a third of the sky is still open.
     this.coverageGain = 2.60;
-    this.coverageBias = -1.58;
+    this.coverageBias = -1.10;
     this.erosion = 0.44;
     this.densityScale = 1.0;
 

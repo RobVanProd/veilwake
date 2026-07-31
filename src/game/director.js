@@ -347,6 +347,7 @@ export class Director {
       y: Math.max(240, p.y + (opts.dy ?? 0)),
       z: p.z + f.z * d + (rz / rl) * side,
     };
+    at.y = this._vapourY(at.x, at.y, at.z);
     const seed = (this.rng ? Math.floor(this.rng() * 1e9) : 1) | 0;
     const Ctor = { Listener, Lantern, WakeHunter, Choir }[kind];
     if (!Ctor) return null;
@@ -356,6 +357,44 @@ export class Director {
     this.creatures.add(c);
     this._spawned.push(c);
     return c;
+  }
+
+  /**
+   * Slide a spawn altitude to where the vapour actually is.
+   *
+   * The horizontal placement is the encounter design — `d` and `side` are chosen
+   * against detection range and against how long the ship stays audible, and
+   * this must not touch either. Altitude carries none of that meaning: the
+   * default was the player's own, and players fly where they can see, which is
+   * the one part of the sky with nothing in it. Measured over a full run, every
+   * corridor the Listener carved was cut through air of exactly zero density,
+   * and the same emptiness is why creature bodies keep reading as models pasted
+   * on the sky rather than as things inside weather.
+   *
+   * Averaged over a short span along the spawn's own heading rather than taken
+   * at a point, so a single wisp cannot win. Falls back to the requested
+   * altitude when the column is empty — in a sky with no cloud in it this is a
+   * no-op, which is what the contract tests fly through.
+   */
+  _vapourY(x, y0, z) {
+    const cl = this.clouds;
+    if (!cl || !cl.densityAt) return y0;
+    const SPAN = 700, STEP = 100, ARM = 400;
+    const score = (y) => (
+      cl.densityAt(x, y, z) +
+      cl.densityAt(x + ARM, y, z) + cl.densityAt(x - ARM, y, z) +
+      cl.densityAt(x, y, z + ARM) + cl.densityAt(x, y, z - ARM)
+    ) / 5;
+    let bestY = y0, best = score(y0);
+    for (let dy = -SPAN; dy <= SPAN; dy += STEP) {
+      if (dy === 0) continue;
+      const y = Math.max(240, y0 + dy);
+      const s = score(y);
+      // Strictly greater, so a tie leaves the creature where the beat asked for
+      // it and the search cannot introduce a bias of its own.
+      if (s > best) { best = s; bestY = y; }
+    }
+    return best > 0.02 ? bestY : y0;
   }
 
   /** Everything this beat put in the world goes dormant when the beat ends. */

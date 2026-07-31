@@ -18,7 +18,7 @@ Last updated: after corridor carving landed and the NOT-reachable list emptied.
 
 | Thing | State | Notes |
 |---|---|---|
-| **Volumetric clouds** | ✅ | The best thing in the project. GPU ray-march, multi-scatter, aerial perspective, 2.1 ms of a 7 ms budget. CPU and GPU sample the same field, proven to 0.0015. |
+| **Volumetric clouds** | ✅ | The best thing in the project. GPU ray-march, multi-scatter, aerial perspective, 2.1 ms of a 7 ms budget. CPU and GPU sample the same field, proven to 0.0015. Coverage bias was raised from −1.58 to −1.10 after measuring that 65.6% of the world had *exactly zero* cloud in it; see the note under Known defects. |
 | **Luminaries** | ✅ | Three coloured sources rise and set on long cycles. No sun. The whole palette derives from whichever are up. |
 | **Flight model** | ✅ | Forces not velocities, anisotropic drag, commanded-bank servo, stall. 12 control-polarity tests. |
 | **Ship camera** | ✅ | Spring-mounted with velocity feed-forward, hard self-turn cap, seven comfort options, all adjustable from Options. |
@@ -37,7 +37,8 @@ Last updated: after corridor carving landed and the NOT-reachable list emptied.
 | **Signature instruments** | ✅ | Six live columns in the centre of the console, reading the real channels. |
 | **All four creatures in the slice** | ✅ | Lantern at TRACE, Listener through the middle, a Wake Hunter pack at HUNTED, a Choir on the way out. |
 | **Corridor carving** | ✅ | The Listener's 300 m corridor is cut out of the volume the player is looking at. On the axis 92% of the density is gone, softening to nothing by the wall; segments refill over 240 s. The shader's `vw_carve` and the CPU's `_carve` read the same packed segments, so `clearance()` and the picture are one number — CPU/GPU agreement holds at 0.0012 with corridors live. |
-| **Test suite** | ✅ | 170 passing across 9 suites, including the art direction, corridor carving and the whole vertical slice as regressions. |
+| **Hiding** | ✅ | Concealment along a played route went from 0.00 at five of six sampled moments to a mean of 0.23, usable (>0.2) 28% of the time. Before the coverage fix the game's central survival verb had nowhere to happen. |
+| **Test suite** | ✅ | 173 passing across 9 suites, including the art direction, corridor carving and the whole vertical slice as regressions. |
 
 ---
 
@@ -48,17 +49,10 @@ Everything here exists in the repo and is unreachable from the running game.
 *Empty.* Corridor carving was the last entry and shipped; see the note below for
 why it sat here so long.
 
-> **Worth remembering.** Corridor carving was complete on the simulation side for
-> weeks — the field aged, refilled and served `clearance()`, the Listener carried
-> one, and §2.3's duct test already routed sound down it. What was missing was two
-> things at once: the renderer never carved, and `carving` defaults to `false` so
-> that a creature under test does not reshape the medium it is measured in.
-> Nothing in the game overrode that default. So the field stayed permanently
-> empty, no test went red, and the TRACE beat said SOMETHING CAME THROUGH HERE
-> over undisturbed cloud. The lesson for this table: "module exists and is
-> imported" was not a strong enough test of *built*. `tests/corridor.test.js` now
-> asserts the whole chain — field carves → renderer is told → density drops →
-> CPU and GPU still agree.
+> **Worth remembering**, because this table exists to catch it: corridor carving
+> sat here for weeks with every individual piece green. The note at the end of
+> Known defects has the whole story and the two further things it turned out to
+> be hiding.
 
 ---
 
@@ -80,10 +74,34 @@ Measured, not suspected.
    density from the inside of the shoal — 0.25% of frame at 4,033 points.
 4. **The Listener's flank vanes read as pale lobes** stuck on the body rather
    than tissue continuous with it.
-5. **The first ~90 seconds of a run are near-black** (mean luminance 32/255 at
-   t=45 s) before the weather opens up.
-6. **`wonder` is never derived**, so the score's "awe" role is unreachable in
+5. **The first ~90 seconds of a run are near-black** (p50 23/255 at t=60 s)
+   before the weather opens up. Unchanged by the coverage fix, and if anything
+   marginally darker — more cloud between the camera and the luminaries. The
+   cause is the opening geometry, not the amount of weather.
+6. **The Listener rarely carves in play, even now.** Its vertical drift into the
+   vapour works — measured over six patrols from different seeds and altitudes,
+   the fraction of carved corridor lying in real cloud went 0.30 → 0.73 — but
+   the drift is deliberately suspended while TRACKING or COMMITTED, and the
+   director spends most of the creature's live time in exactly those states. A
+   full run still produces only ~11 segments with 18% of them in cloud. The
+   corridor is now genuinely visible *when it happens*; it does not happen often.
+   The fix is in how the director uses the creature, not in the carve or the
+   navigation.
+7. **`wonder` is never derived**, so the score's "awe" role is unreachable in
    normal play. It needs a real vista signal from the director.
+
+> **What "built" cost this project, again.** Corridor carving looked finished for
+> weeks: the field aged and refilled, the creature queried it, §2.3's duct test
+> used it. Two things were missing at once — the renderer never carved, and
+> `carving` defaults to `false` so a creature under test does not reshape the
+> medium it is measured in. Nothing overrode the default. Chasing that turned up
+> a larger version of the same shape: 65.6% of the world had *exactly zero*
+> cloud, median coverage 0, because `clamp01(W*2.60 − 1.58)` clipped everything
+> below W=0.608 to nothing. Three unrelated-looking complaints were that one
+> number — corridors cut through nothing, creature bodies reading as models on a
+> flat backdrop (21% of their live seconds were inside any weather at all), and
+> nowhere to hide in a game whose survival verb is hiding. None of it failed a
+> test, because nothing tested the composition.
 
 ---
 
