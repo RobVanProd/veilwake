@@ -1,0 +1,350 @@
+[
+ {
+  "module": "src/game/creatures/creature.js",
+  "verdict": "usable-with-repair",
+  "linesOfRealLogic": 436,
+  "complete": [
+   "FRAMING CORRECTION: this file is NOT the Listener. It is the shared base + formula library (contract sections 1,2,4,5,6,7). There is no Listener archetype anywhere in the repo -- `git ls-files | grep -i listen` returns only CREATURE_BEHAVIOR_CONTRACT.md, and src/game/creatures/ contains exactly one file. Creature.sense() returns [] (line 708) and Creature.behave() is empty (line 710). Everything in section 10.1 -- acoustic sense, 40 dB(V) emission, corridor carving, patrol, the 16->6 dB listening window -- is unwritten.",
+   "Acoustic transmission (section 4.1) reproduces the contract's worked values to within 0.04 dB. Measured from a cruise emission of 46 dB(V) in open clear air: 300 m -> 36.46 (contract 36.5), 1000 m -> 26.00 (26.0), 3000 m -> 16.46 (16.5), 6000 m -> 10.44 (10.4), and 6000 m inside a full duct -> 24.66 (24.7).",
+   "Sense ranges fall out correctly from that formula, matching section 10.1 without being tuned to. Bisected the range where received == threshold: cruise 46 dB(V) at threshold 16 -> 3162 m (contract 'about 3.2 km'), at the listening threshold 6 -> 10000 m (contract '10 km'). The 3.2x factor the design leans on is exact.",
+   "visibilityM(rho) matches the contract's sanity table: rho 0/0.25/0.5/0.75/1 -> 4000 / 986.4 / 243.2 / 60.0 / 14.8 m vs the stated 4000/987/244/60/15.",
+   "ductFromField reproduces section 2.3 verbatim and is not degenerate on the real cloud field. Unit checks: grad 0 -> 0; grad 0.002 at rho 0.1 -> 1.0; the same strong gradient inside a dense core (rho 0.95) -> 0. Sampled 400 points on GAME.clouds around the ship: 11% non-zero, p95 = 0.602, max 1.0 -- so ducts do occur naturally, and a p95 duct drops the spreading exponent from 20 to 15.2.",
+   "The attention integrator matches section 5.4's headline number. Drove a probe creature with excess held at exactly 0.4 and Listener constants (fill 0.12, decay 0.012): UNAWARE->COMMITTED in 19.1 s, against the contract's stated 19 s.",
+   "The escalation ladder walks one rung per transition and writes exactly one DetectionEvent per rung, never a jump. Log from that run: 5.20 UNAWARE->ALERT, 9.30 ALERT->SEARCHING, 14.50 SEARCHING->TRACKING, 19.10 TRACKING->COMMITTED. transitionCount() == 4.",
+   "The state machine converges. Swept all 5 states x 201 attention values (1005 cases) calling _resolveStates twice: 0 cases where the second call changed the state. It settles in one tick.",
+   "Hysteresis genuinely suppresses chatter. Parked attention on each of the four entry thresholds and alternated percept/no-percept every sense tick for 10 s: 0 state flips at ALERT, SEARCHING, TRACKING and COMMITTED.",
+   "The propagation delay is real and observable -- this is the design intent landing. Recorded a 70 dB(V) burst at t=100-102 against a 46 dB(V) cruise floor, then read the recorder as a 3 km listener would: nothing until t=109, then received jumps to 40.46 dB at t=110 (emitted at t=101) and falls back to 16.46 dB at t=112. That is a 9.1 s lag against soundDelayS(3000) = 9.09 s. You are heard for something you did nine seconds ago.",
+   "False-positive rate is correct, including the medium scaling. Measured over 200k sense ticks x 6 seeds: mean 0.0200 Hz against the contract's 0.02 base (per-seed 0.0192/0.0209/0.0215/0.0181/0.0204/0.0201). With section 5.3's acoustic mediumFactor of 2.0*g at g=1: 0.058 Hz vs the expected 0.060. I first measured 0.0171 on a single seed and re-ran across seeds rather than report it -- it was noise, not a bug.",
+   "azimuth and azimuthDir are exact inverses: max round-trip error 2.22e-16 rad over 64 bearings. (Measured as a round trip against a locally constructed direction, not against a world axis, per the project's lesson 1.)",
+   "Per-creature RNG isolation works. Two creatures handed the same parent Rng produce different false-positive sequences, because Rng.fork (rng.js:88) calls this.next() and advances the parent. I checked this rather than trusting the comment at line 59.",
+   "Cost is inside the section 8 budget. One 8-sample path integral over the real cloud field: 0.0429 ms on a cold cache, 0.0053 ms warm. Six creatures at one path each = 0.26 ms cold against the 1.0 ms AI budget."
+  ],
+  "gaps": [
+   {
+    "what": "The Listener does not exist. This module is the base class only -- no archetype implements sense() or behave(), so nothing in the project can ever produce a percept. Priority 4's actual deliverable is unwritten.",
+    "severity": "blocking",
+    "fix": "Write src/game/creatures/listener.js as `class Listener extends Creature`. sense() must: compute distance to ship, reject beyond FAR_PLANE, read the signature history at the sound delay for that distance, call pathTerms into `this._terms`, call acousticReceived + acousticBearingSigma, perturb the bearing by sigma from this.rngSense, and return one percept (plus rollFalsePositive with mediumFactor 2.0*g_local). behave() must implement the patrol/carve and the per-state closing speeds from the 10.1 table. Also needs the 100-160 s silence window that drops currentThreshold() from 16 to 6 for 18-26 s -- currentThreshold() (line 546) exists as the override point and is currently a constant."
+   },
+   {
+    "what": "Nothing ever sets simLevel, so no creature ever senses. It defaults to 'reduced' (line 525) and update() gates sensing on fullySimulated (line 556). promotionRadius is computed at line 520 (16800 m for a FAR_PLANE sensor) and read by nothing; logPromotion (line 661) is called by nothing.",
+    "severity": "blocking",
+    "fix": "main.js owns promotion. Measured: a default creature runs sense() 0 times in one second; with simLevel='full' it runs exactly 10. Sort by distance each step (or on a slow rota), set 'full' for the nearest <=6 inside promotionRadius, 'reduced' otherwise, and call logPromotion on every change so section 8's 'nothing appears from nowhere' holds."
+   },
+   {
+    "what": "The one-COMMITTED-at-a-time rule (contract sections 6 and 11.1) has no implementation. Ran three identical probe creatures against the same stimulus for 25 s: all three reached COMMITTED simultaneously.",
+    "severity": "major",
+    "fix": "Needs a manager above Creature -- the base class cannot see its peers. After updating all creatures, if more than one is COMMITTED, keep the highest-attention one and force the rest to SEARCHING through _transition so the demotion is logged."
+   },
+   {
+    "what": "tests/listener.js is cited twice as the file that proves this module works (line 24 'the tests in tests/listener.js construct a world with no GPU in it', and line 741 'what lets tests/listener.js assert the budget rather than assume it'). It does not exist. tests/ contains only controls.test.js and index.html.",
+    "severity": "major",
+    "fix": "Write it. The module is genuinely headless -- no Three.js import, plain {x,y,z} vectors -- so every check in this audit runs without a GPU and can be ported into the runner directly."
+   },
+   {
+    "what": "this.estimate is declared (line 527) and read by snapshot() and the memory-purge branch (line 586), but nothing ever writes it. onPercept (line 712) is an empty hook. So `memorySec` is dead and no creature can hold a position estimate -- which is what SEARCHING and TRACKING are defined to act on.",
+    "severity": "major",
+    "fix": "The Listener's onPercept must fuse bearing + strength into an estimate {x,z,sigma,tSec} and store it. Until then the section 10.1 behaviours ('sweeps the bearing estimate', 'turns onto the estimate') have nothing to aim at."
+   },
+   {
+    "what": "SignatureRecorder stores no position, so createSignatureView's fallback always fires: positionExact is false on every percept and transmission distance has to be computed from where the ship is NOW, not where it was when the sound was made. The delay is therefore observable in emission but not in geometry -- a ship that moves 500 m during a 9 s flight time is still ranged from its current position.",
+    "severity": "minor",
+    "fix": "The module documents this honestly at lines 300-315 and degrades correctly rather than lying. Either add x/y/z to SignatureRecorder's channel set (3 floats on a 14 KB buffer, as the comment proposes) or accept it and keep positionExact in the log."
+   },
+   {
+    "what": "ctx.medium is mandatory even for a creature that never samples it. _senseTick line 564 dereferences ctx.medium.samplesTaken unconditionally.",
+    "severity": "minor",
+    "fix": "Guard it, or document ctx.medium as required. Confirmed: update() with ctx lacking medium throws \"Cannot read properties of undefined (reading 'samplesTaken')\"."
+   }
+  ],
+  "bugs": [
+   {
+    "file": "src/game/creatures/creature.js",
+    "line": 612,
+    "problem": "De-escalation from COMMITTED lands in SEARCHING and then immediately re-escalates to TRACKING inside the same sense tick, defeating the contract's explicit rule. Line 611 correctly picks SEARCHING as the down target, but line 612's `continue` re-enters the loop, where line 604 sees attention (0.736-) still >= STATE_ENTRY[TRACKING] (0.70) and promotes straight back up. The net observable transition is COMMITTED->TRACKING, which section 6 forbids by name. The bug is not really the `continue`: the exit line for COMMITTED (0.736) and the entry line for TRACKING (0.70) are only 0.036 apart, which at the Listener's 0.012/s decay is 3 seconds, so simply breaking after a down-step would still put the creature back in TRACKING almost at once. Honouring the rule requires the COMMITTED->SEARCHING transition to also drop attention below TRACKING's entry.",
+    "evidence": "Drove a probe to COMMITTED, set attention to 0.92 and cut the stimulus. State trace: `t=15.4 att=0.7352 COMMITTED->TRACKING`, then `t=30.1 TRACKING->SEARCHING`. The creature never hunts the area -- it spends 14.7 more seconds tracking. The detection log shows the mechanism as two events at an identical timestamp: `t=15.40 COMMITTED->SEARCHING ch=decay att=0.7352` followed by `t=15.40 SEARCHING->TRACKING ch=decay att=0.7352`. Isolated it to a single call: state=COMMITTED, attention=0.7359, one _resolveStates -> ends in TRACKING having emitted both events. Note the second is an ESCALATION stamped channel 'decay', because logEvent (line 634) infers the channel from a null cause. Swept all attentions: exactly the band [0.700, 0.735] mis-lands in TRACKING -- which is precisely the band a continuously decaying creature must pass through, so in play it fires every time."
+   },
+   {
+    "file": "src/game/creatures/creature.js",
+    "line": 349,
+    "problem": "createSignatureView.sampleAt(t) forwards its argument straight into history(t), and its docstring (lines 347, 300-317) defines that argument as an absolute sim time -- 'What the ship was emitting at t'. The only history implementation in the project is SignatureRecorder.at (src/game/signature.js:393), whose parameter is an AGE IN SECONDS ('What the ship was emitting ageSec ago'). pick() at line 321-322 binds it as the history source. The two conventions are mirror images, and nothing type-checks the difference.",
+    "evidence": "Built a real SignatureRecorder, ran it to t=60 s, then called view.sampleAt(50.91) -- the absolute time a 3 km listener should read per the docstring. It returned the sample from simTime 9.0, i.e. 42 seconds wrong, mirrored about the present. The age convention view.sampleAt(9.09) returned simTime 51.0, which is correct. Worse, the recorder only spans 300 s: at t=400 s the absolute-time call returned null at every distance tested (300 m -> passed 399.09 -> null; 3000 m -> 390.91 -> null; 6000 m -> 381.82 -> null; 12000 m -> 363.64 -> null), because at() computes back = round(ageSec*hz) and rejects back >= count. A Listener wired per the docstring is deaf for the first five minutes in a scrambled way, then permanently and silently deaf."
+   },
+   {
+    "file": "src/game/creatures/creature.js",
+    "line": 213,
+    "problem": "The derived-field cache is not deterministic, contradicting both its own comment and contract 2.1. derive() keys on quantised position and quantised time (line 213), but the values it stores are computed from source.densityAt/flowAt at whatever internal advection state the CloudSystem happens to be in when the entry is first created (lines 221-230). Time is in the key but not in the computation, so two calls with identical (x,y,z,t) return different answers depending on cache warmth. Density escapes this because line 247 samples it live -- which makes it worse: a returned MediumSample can carry a fresh density alongside a duct derived from a field state up to cellS=1.0 s old.",
+    "evidence": "Probed a dense point (x=3353, y=850, z=1573, density 0.609) on the live GAME.clouds, sampled at t=5.0, then advanced field.shapeAdvect/weatherAdvect by 900 m and re-sampled at the SAME t=5.0. Warm cache returned {density 0.15701, duct 0.93605, turbulence 1.0}. A freshly built medium given the identical query returned {density 0.15701, duct 0.98438, turbulence 0.416}. Turbulence differs by 2.4x for the same (x,y,z,t). The comment at lines 194-196 claims it 'returns bit-identical values whether or not it happens to be warm -- a cache that changes results under replay is worse than no cache'; that is false as written. Contract 2.1 requires purity because 'the capture harness depends on two calls at the same sim time producing identical results, and so does every replay of a detection', and section 12 requires an identical detection log on replay."
+   },
+   {
+    "file": "src/game/creatures/creature.js",
+    "line": 739,
+    "problem": "countingMedium counts calls to sample(), not field evaluations, so it under-reports the section 8 budget by roughly 8x. Each cold sample() costs 1 densityAt for the density plus, inside derive(), 4 densityAt for the tetrahedral gradient and 1 flowAt -- and CloudSystem.flowAt itself makes 3 more _densityCloud evaluations internally (clouds.js:878-880). The comment at lines 733-735 says the counter is what makes the cap measurable ('a cap nobody measures is a cap that has already been exceeded'), but MEDIUM_SAMPLE_BUDGET=32 compared against this counter permits 4 path integrals per sense tick, i.e. about 256 real field evaluations.",
+    "evidence": "Instrumented GAME.clouds.densityAt and flowAt and ran one 8-sample pathTerms through countingMedium(createMedium(clouds)) on a cold cache: countingMedium reported 8, while the real field took 40 densityAt calls and 8 flowAt calls -- 64 density evaluations once flowAt's internal three are counted. A single sample() reported 1 against 5 real densityAt + 1 flowAt. The cache does amortise this in steady state (0.0429 ms cold vs 0.0053 ms warm per path), so the budget is not actually being blown today -- but the instrument cannot tell you that, which is the bug."
+   },
+   {
+    "file": "src/game/creatures/creature.js",
+    "line": 536,
+    "problem": "this._terms is allocated and then never written by anything in the base class, so every DetectionEvent reports rho_mean/u_mean/q_mean/g_mean as 0. logEvent copies it verbatim at lines 648-653. Section 7's requirement is not just that a transition writes a record but that the record explains itself -- the contract's worked example turns on 'through rho 0.02 / duct 0.81', which is the clause that says why it was heard at six kilometres. pathTerms takes a dst argument that would make this work, but nothing in the base class passes this._terms and nothing checks that an archetype did.",
+    "evidence": "Ran a probe creature to COMMITTED and read the third log event: medium came back {rho_mean: 0, u_mean: 0, q_mean: 0, g_mean: 0}, and formatEvent rendered `t=10.6  Listener#0  SEARCHING->TRACKING  acoustic  emitted 46.0, transmitted 40.0 at 5980 m through rho 0.00 / duct 0.00, threshold 16.0` -- structurally the contract's sentence with the explanatory half zeroed out. Confirmed _terms is still at its constructor values after 20 s of sensing."
+   },
+   {
+    "file": "src/game/creatures/creature.js",
+    "line": 201,
+    "problem": "createMedium validates that the source has densityAt but then calls source.flowAt unconditionally at line 230, so a density-only source passes the guard and throws on first sample. The guard and the requirement disagree.",
+    "evidence": "createMedium({ densityAt: () => 0.2 }).sample(0,0,0,0) throws 'source.flowAt is not a function'. CloudSystem happens to satisfy both, so this only bites the synthetic worlds the header comment (lines 17-20) says the adapters exist to support."
+   }
+  ],
+  "deadCode": [
+   "The entire module. Nothing imports it: `grep -rn \"creatures/creature\" src/ tests/ index.html` returns zero hits, and in the running page Object.keys(GAME) is [THREE, renderer, scene, camera, loop, rng, BUDGET, clouds, ship, controls, shipCam, input, pointer, pad, stats, violations, seek, diag, capture, benchRender, ready] -- no creatures, no detectionLog, no signature. main.js's import list (lines 14-24) has no creature or signature import at all.",
+   "Of 45 exports, the following are called by nothing in the module and nothing in the project: soundDelayS, acousticReceived, acousticBearingSigma, photicReceived, emReceived, pathTerms, makePercept, perceptExcess, formatEvent, createMedium, createFlatMedium, countingMedium, createSignatureView, azimuth, azimuthDir, wrapAngle, vcopy, vdist, vdistSq, visibilityM, ductFromField, makeMediumSample, MEDIUM_SAMPLE_BUDGET, PATH_SAMPLES, RNG_TAG, SHIP_LENGTH, UNIT, FAR_PLANE. They are a correct library for an archetype that was never written.",
+   "Creature.rollFalsePositive (line 691) -- measured working at 0.0200 Hz, called by nothing.",
+   "Creature.logPromotion (line 661) and this.promotionRadius (line 520) -- the whole section 8 promotion path is declared and unreachable.",
+   "Creature.onPercept (line 712) and this.estimate / this.memorySec -- hook and state with no writer.",
+   "this.velocity (line 504) and this.bodyLength (line 505) -- set and never read. bodyLength is what section 4.5's contact channel senses within 2x, and that channel has no implementation.",
+   "this.mediumSamplesLastTick (line 539) -- computed every sense tick, read by nothing.",
+   "Creature.transitionCount (line 679) and Creature.snapshot (line 716) -- both work, both unreferenced.",
+   "medium.transmittance is plumbed through createMedium (line 256) and countingMedium (line 740) and the comment says the Listener does not need it; no archetype needs it yet either."
+  ],
+  "integrationNeeds": "main.js is currently 100% clean of this layer -- no import, and GAME has no creatures/detectionLog/signature key. Wiring is not a one-liner because the thing to wire does not exist yet: write src/game/creatures/listener.js first (see the blocking gap). Given that, main.js must do the following.\n\nIMPORTS (add to the block at main.js lines 14-24):\n  import { Signature } from './game/signature.js';\n  import { createMedium, countingMedium, createSignatureView, formatEvent, STATE, soundDelayS } from './game/creatures/creature.js';\n  import { Listener } from './game/creatures/listener.js';\n\nCONSTRUCTION (once at boot, near where `clouds` and `ship` are made):\n  const signature = new Signature({ medium: clouds });\n  const sigView   = createSignatureView(signature.recorder);   // NOT signature itself -- Signature has no sampleAt/at/historyAt, so createSignatureView(signature) yields hasHistory:false and silently degrades to live-only, which destroys the propagation delay. Verified.\n  const medium    = countingMedium(createMedium(clouds));\n  const creatures = [ new Listener({ id:0, rng: rng.fork(RNG_TAG.LISTENER), senseOffset:0,  position:{...}, fillRate:0.12, decayRate:0.012, memorySec:240, threshold:16, saturation:60, falsePositiveBase:0.02, longestSenseRange:FAR_PLANE }) ];\n  Give each creature a DIFFERENT senseOffset in 0..11 -- that stagger is the sensing latency per section 5.2, and identical offsets both spike the cost and remove the latency.\n\nPER FIXED STEP, inside update(dt) at 120 Hz, in this order:\n  1. signature.update(dt, ship, systems)  -- must run BEFORE the creatures, or they read a recorder that is one step stale.\n  2. loop.perf.begin('ai')\n  3. Promotion pass (nothing in creature.js does this and creatures never sense without it): for each creature compute vdist(c.position, ship.position); the nearest <=6 inside c.promotionRadius get c.simLevel='full', the rest 'reduced'; on any change call c.logPromotion(ctx, from, to, dist).\n  4. const ctx = { tick: loop.tick, t: loop.simTime, medium, signature: sigView, shipPos: ship.position, shipVel: ship.velocity };\n     Reuse one ctx object; do not allocate per creature per step.\n  5. for (const c of creatures) c.update(loop.stepSec, loop.tick, ctx);\n     ctx.medium is mandatory -- _senseTick dereferences ctx.medium.samplesTaken unconditionally and throws without it.\n  6. One-COMMITTED enforcement (contract 6, unimplemented anywhere -- I measured 3 simultaneous COMMITTED): if more than one c.state === STATE.COMMITTED, keep the highest attention and push the rest to SEARCHING via _transition so the demotion is logged.\n  7. loop.perf.end('ai')  -- section 8 budgets creature AI at 1.0 ms and section 12 requires it measured with perf.begin/end('ai'), not assumed.\n\nHOW THE LISTENER MUST READ THE PAST (this is where bug 2 bites): call sigView.sampleAt(soundDelayS(d), ship.position) with an AGE, not sigView.sampleAt(t - soundDelayS(d), ...) as the docstring instructs. The absolute-time form returns null at every distance once simTime > 300 s. Fix the adapter to `history(ctx.t - t)` (or make the Listener pass an age) and pick one convention in the docstring.\n\nRENDERING: creature.js deliberately has no Three.js and holds only {x,y,z}. main.js owns the mesh -- create one per creature at boot, and in render() copy creature.position into mesh.position. A 240 m body at FAR_PLANE=12000 needs its own LOD/near-far handling; nothing here helps with that.\n\nAUDIO: src/audio/language.js already exports CreatureVoice and CREATURES.listener. main.js must feed it {state, attention, distance, bearing} per frame; creature.js emits none of that on its own and the section 10.1 call schedule (every 40-90 s, silent while ALERT+) has to live in the Listener's behave().\n\nGAME SURFACE (section 7 requires it by name -- 'Exposed as GAME.detectionLog(), returning the last 64'):\n  creatures,\n  signature,\n  detectionLog: () => creatures.flatMap(c => c.detectionLog()).sort((a,b) => a.simTime - b.simTime).slice(-64),\n  detectionLines: () => GAME.detectionLog().map(formatEvent),\n  creatureStates: () => creatures.map(c => c.snapshot()),\nWithout at least detectionLog on GAME there is no way to run section 12's pass condition ('every state transition in a 900 s recorded session has a matching DetectionEvent, zero exceptions').\n\nDETERMINISM CAVEAT: GAME.seek()/GAME.capture() jump the sim. The derived-field cache in createMedium returns different duct/turbulence for the same (x,y,z,t) depending on warmth (bug 3), so a detection log replayed after a seek will not reproduce. Fix that before relying on captures as creature regression baselines."
+ },
+ {
+  "module": "src/render/lights.js",
+  "verdict": "usable-with-repair",
+  "linesOfRealLogic": 216,
+  "complete": [
+   "Uniform packing is correct and space-correct. Verified by driving writeUniforms() against a mock uniform object: uLightPos.w = 1/radius (55 m -> 0.01818), uLightCol.rgb = colour * intensity ([5, 4.7, 4.1] for the lamp), uLightCol.a = the per-frame shadow grant (1 for the lamp, 0.45 for the thruster, 0 for the six that lost the budget), uLightPar.y = range^2 (1509475 for the lamp = 1228.6^2). Positions are rebased by `origin` (clouds.js passes this.origin, and clouds.js:771 fills _v3 from camera.getWorldPosition, so the cull runs in world space and the packing in cloud space \u2014 both correct).",
+   "The omni-as-spot encoding works as claimed. OMNI_COS_OUTER = -2.0 / OMNI_COS_INNER = -1.2 are written straight through, and smoothstep(-2.0, -1.2, dot) saturates to 1 for every direction, so an omni light takes the same branch-free path as a spot. Confirmed in the packed uniforms: omni lights carry dir.w = -2, par.x = -1.2.",
+   "The inner>=outer guard at line 251 works. Feeding cone {inner:1.2, outer:0.30} produced cosOuter 0.95534 and cosInner 0.95563 \u2014 still correctly ordered for smoothstep, so a mis-authored cone degrades to a hairline edge instead of producing a NaN or an inverted cone.",
+   "prepare() is deterministic and its bounded set is a pure function of the scene. With 22 registered lights, two consecutive prepare() calls returned the byte-identical order [lamp, thr, bio1, bio2, bio0, bio3, bio4, bio5] and active.length capped at 8.",
+   "The shadow budget is enforced on the default construction path. With 22 lights registered and 8 active, exactly 2 carried _shadowThisFrame > 0 (debugSummary().shadowed === 2), matching MAX_SHADOWED_LIGHTS.",
+   "The occlusion march is real and load-bearing \u2014 it just needs density to show. With the camera inside cloud (densityAt = 0.6004 at the camera, measured), a shipLamp at intensity 12 differed from lamp-off by meanAbs 8.24 / maxAbs 577 (of 765), and shadow:1 vs shadow:0 differed by meanAbs 1.996 / maxAbs 212 \u2014 roughly a quarter of the lamp's whole contribution is being removed by occlusion. shadowRange 600 vs 40 differed by meanAbs 0.363 / maxAbs 50, so that knob is live too. An earlier identical test in clear air showed a 0.000 difference, which was a null environment and not a bug \u2014 I checked before reporting it.",
+   "signature() arithmetic is correct. A registry holding shipLamp(intensity 5) + shipLamp(intensity 5, on:false) + bioluminescence(intensity 99) returns exactly 5 \u2014 off lights excluded, non-signature lights excluded, and it is sum(intensity * max(colour)) as documented.",
+   "The registry is correctly hooked into the render path. clouds.js:797-798 calls lights.prepare(this._v3, u.uCamFwd.value) then lights.writeUniforms(u, this.origin) inside _writeCameraUniforms, per drawn frame rather than per fixed step. Nothing in main.js needs to call either.",
+   "Reachable at runtime as GAME.clouds.lights \u2014 confirmed on a fresh page load (hasLights: true)."
+  ],
+  "gaps": [
+   {
+    "what": "The module has no content. On a fresh page load GAME.clouds.lights holds exactly 4 lights \u2014 storm/0..storm/3, all on:false, all intensity 0 \u2014 and lights.signature() returns 0. Nothing anywhere in the repo calls shipLamp(), thrusterPlume() or bioluminescence(); grep across every .js and .html finds them only inside lights.js itself. Every god-ray source the art direction names as required (ship exterior lights, thrusters, creature bioluminescence) is absent at runtime. The module is a correct engine with no fuel in it.",
+    "severity": "blocking",
+    "fix": "main.js must add and drive at least the ship lamp and the thruster plume \u2014 see integrationNeeds for the exact calls. This is ~15 lines and is the single highest-value change in the whole audit."
+   },
+   {
+    "what": "MAX_MARCH_LIGHTS = 8 is roughly 2.7x more lights than the shader can afford, and the module's own header says the opposite (\"A scene may hold any number of lights and the shader cost does not move\"). Measured with clouds.benchPass (EXT_disjoint_timer_query_webgl2, not gl.finish), 1280x720, quality high, camera inside density-0.60 cloud, lights within range of most march samples: 0 lights 2.479 ms; then 4.179, 5.964, 7.493, 9.070, 10.657, 12.208, 13.691, 15.216 ms for n = 1..8. That is a dead-straight +1.57 ms per light. The 7 ms volumetric budget is blown at n = 3 and exceeded 2.2x at n = 8 (benchPass reported withinBudget: false).",
+    "severity": "blocking",
+    "fix": "Either drop MAX_MARCH_LIGHTS to 2-3 and re-tune priority so the lamp and the nearest event always win, or make the shader's analytic path cheaper. Do not spend the saving on more shadow marches \u2014 see the next item, they are already free."
+   },
+   {
+    "what": "The cost model in the header comment is inverted. It says occlusion \"is the only part that costs texture fetches\" and caps it at 2 for that reason. Measured: 8 lights with shadow forced to 0 cost 15.216 ms; the same 8 with the registry granting 2 shadow marches cost 15.257 ms. The shadow marches are 0.04 ms of a 15.2 ms pass \u2014 0.3%. MAX_SHADOWED_LIGHTS = 2 is buying nothing, and the budget is being spent entirely on the path the header calls free.",
+    "severity": "major",
+    "fix": "Raise MAX_SHADOWED_LIGHTS (occlusion is what makes a beam read as volume) and cut MAX_MARCH_LIGHTS instead. Then rewrite the header comment \u2014 it is currently misleading anyone who tunes this next."
+   },
+   {
+    "what": "The signature coupling that justifies the module's existence is not wired, and the two ends do not share units. lights.js:277 signature() returns a radiance sum in the CLOUD_PALETTE scale (shipLamp 5.0, lamp+plume 6.5). signature.js:757 _photic() sums bus.records[].photicLm in LUMENS plus a hard-coded plume term, with SIG.caps.photic = 60000 and SIG.exposureRef.photic = 40000. Nothing imports lights.js into signature.js; LightRegistry.signature() has zero callers in the repo. The ShipSystems class that _photic() reads its records from (signature.js:587 JSDoc, :770) does not exist anywhere in the repo either.",
+    "severity": "major",
+    "fix": "A ShipSystems emitter must convert the registry's radiance total into lumens and push it as photicLm. The conversion constant is exactly the kind of number this project has been burned by three times \u2014 measure it against the anchor table in signature.js rather than picking one, and record the measurement next to it."
+   },
+   {
+    "what": "GAME does not expose the registry. Object.keys(GAME) on a fresh load is [THREE, renderer, scene, camera, loop, rng, BUDGET, clouds, ship, controls, shipCam, input, pointer, pad, stats, violations, seek, diag, capture, benchRender, ready] \u2014 no `lights`. debugSummary() exists precisely so a capture can state which lights were live (the comment at line 157 says \"a capture that cannot say which lights were live is not evidence of anything\") and it has no callers and no reachable entry point except the two-hop GAME.clouds.lights.",
+    "severity": "major",
+    "fix": "Add `lights: clouds.lights` to the GAME literal at main.js:205, and fold debugSummary() into the diag overlay at main.js:194."
+   },
+   {
+    "what": "A low, cold, high-contrast key with deep shadow separation is NOT reachable through this module's parameters. Measured on a 320x180 frame: with no local lights, luminance p05 = 92.7, p50 = 119.2, p95 = 244.2, p95-p05 contrast = 151.4. With the ship lamp at its shipped intensity 5.0: p05 92.7 (unchanged), p95 244.2 (unchanged), contrast 151.4 (unchanged), mean +2.5%. Cranked to intensity 400 \u2014 eighty times shipped \u2014 p05 is STILL 92.7, unchanged to the last 8-bit level, and contrast reaches only 159.5 (+5%). The shader adds local lights (radiance += vw_localLights at both the mist and cloud sample sites), so this module is purely additive: it can raise the floor and can never lower it, darken a shadow, cool the palette, or move the sun. Every lever for the dread key is in clouds.js \u2014 this.sun at clouds.js:191, CLOUD_PALETTE.sun = [3.20, 1.86, 0.92] at clouds.js:129 (a warm amber, and the largest single cause of the golden-hour read), uAmbTop/uAmbBottom, and this.shaft = {mist:1.0, sun:0.22, phaseG:0.58, local:45.0, farShadow:0.30} at clouds.js:246.",
+    "severity": "major",
+    "fix": "Stop looking here for the mood fix. lights.js can supply the \"beauty is the bait\" contrast \u2014 a bright cold beam in a dark frame \u2014 but only after clouds.js has made the frame dark. Assign the key-light pass to whoever owns clouds.js."
+   },
+   {
+    "what": "At its current preset colours the module pushes the frame the wrong way on the one axis it can move. Measured mean(blue) - mean(red) over the frame: 0.97 with no local lights (i.e. the base image is essentially colour-neutral, a 0.4% blue bias on 0-255 \u2014 the art direction's named failure mode of \"generic grey fog\" is measurably happening), and it DROPS to 0.63 when the ship lamp is switched on at intensity 5, because shipLamp's colour is [1.00, 0.94, 0.82], a warm tungsten laid on top of an already-amber palette.",
+    "severity": "minor",
+    "fix": "If the key goes cold, shipLamp's colour should go colder or the lamp becomes the second warm source in a frame that is supposed to have at most one. thrusterPlume [0.55, 0.72, 1.00] and bioluminescence [0.28, 0.86, 0.92] are already right."
+   },
+   {
+    "what": "Concurrency hazard, reported because it affects how much of this audit you should trust. src/render/clouds.js and src/render/shaders/cloud.glsl.js were being rewritten by another agent throughout this audit \u2014 mtimes moved from 21:29:20 to 21:37:51 and 21:31:16 to 21:36:45 while I was measuring, and the shared browser tab was reloaded under me twice. src/render/lights.js itself was stable at 21:25:59 and matches what I read, so every claim about the CPU module is solid. The GPU timings and pixel measurements were taken against a shader that changed during the run and should be re-measured once clouds.js settles.",
+    "severity": "minor",
+    "fix": "Re-run the benchPass light sweep after the clouds.js owner commits. The sweep is 20 lines and is described precisely in the perf finding above."
+   },
+   {
+    "what": "Unverified observation, not attributed to this module: at the point where clouds.densityAt() returned 0.6004 the rendered frame (evidence/audit_lamp_off.png) shows clear blue sky with distant cumulus, not the interior of a cloud. clouds.verifyAgreement() exists to catch exactly a CPU/GPU field disagreement. I did not chase it because clouds.js was mid-rewrite.",
+    "severity": "minor",
+    "fix": "Whoever owns clouds.js should run verifyAgreement() once the file settles."
+   }
+  ],
+  "bugs": [
+   {
+    "file": "src/render/lights.js",
+    "line": 207,
+    "problem": "The range cull tests the CAMERA's distance to the light, but the shader applies the matching window per MARCH SAMPLE. Those are different points. A light in front of the camera and just beyond `range` still has march samples passing through its core (r -> 0, attenuation -> 1), so the CPU throws away light the GPU would have drawn at full strength, and it does so as a hard on/off switch at a sphere in world space.",
+    "evidence": "Live measurement in the running game. Probe = bioluminescence(intensity 6.0), range() = 3286.3 m, placed along the camera forward axis. At 3283 m (0.999 x range) prepare() keeps it (inSet: true) and the frame mean RGB rises by +5.943 / +8.278 / +7.720. At 3288 m (1.0005 x range) prepare() drops it (inSet: false) and the frame changes by exactly +0.000 / +0.000 / +0.000. I then monkeypatched prepare() to append the same light past the cull at that same 3288 m and the shader drew +6.566 / +13.425 / +11.643. So five metres of camera movement \u2014 0.15% of the light's range \u2014 switches a clearly visible glow fully on and fully off. The comment at lines 132-135 claims 'The shader windows the falloff to zero exactly here, so this is not a visible edge'; that is true of a point sample at the light's own range, and false of the cull actually implemented. In game this means a bioluminescent creature (shipped range 1692.8 m) materialises its entire glow in one frame as it drifts toward the player, and a distant storm cell's ember phase (range ~1562 m at ember intensity, ~13 km during a stroke) is invisible until it strokes."
+   },
+   {
+    "file": "src/render/lights.js",
+    "line": 47,
+    "problem": "MAX_MARCH_LIGHTS = 8 cannot be afforded, and the header comment at lines 14-28 asserts the opposite \u2014 'the set handed to the GPU is bounded at MAX_MARCH_LIGHTS ... A scene may hold any number of lights and the shader cost does not move.' The cost moves linearly and steeply with the count, and it is the analytic path \u2014 the one the header calls cheap \u2014 that costs everything.",
+    "evidence": "clouds.benchPass with EXT_disjoint_timer_query_webgl2 (NOT gl.finish, which reported 0.045 ms for every configuration and is the backend lie this project already documented), 1280x720, quality high, camera inside cloud at densityAt = 0.60, bioluminescence probes at intensity 4 so all are in range of most march samples. Volumetric median by light count: n=0 2.479 ms, n=1 4.179, n=2 5.964, n=3 7.493, n=4 9.070, n=5 10.657, n=6 12.208, n=7 13.691, n=8 15.216. Dead linear at +1.57 ms per light. The 7 ms volumetric budget is exceeded at n=3 and by 2.2x at n=8; benchPass itself returned withinBudget: false. Separately, 8 lights with shadow forced to 0 cost 15.216 ms against 15.257 ms with the registry's 2 shadow marches granted \u2014 a 0.04 ms difference, so the entire MAX_SHADOWED_LIGHTS mechanism is guarding a cost that does not exist while the real cost is unguarded."
+   },
+   {
+    "file": "src/render/lights.js",
+    "line": 155,
+    "problem": "`this.maxShadowed = Math.min(maxShadowed, this.max)` clamps against the wrong constant. `max` is correctly clamped to MAX_MARCH_LIGHTS on the line above, but `maxShadowed` is clamped to `this.max` (8) instead of to MAX_SHADOWED_LIGHTS (2), so a caller can silently grant four times the documented shadow budget.",
+    "evidence": "`new LightRegistry({ max: 99, maxShadowed: 99 })` returns max: 8 (correctly clamped) but maxShadowed: 8. After adding eight shipLamps and calling prepare(), eight of them carried _shadowThisFrame > 0 \u2014 four times the MAX_SHADOWED_LIGHTS of 2 that the comment at lines 50-52 says is 'affordable two at a time and not four'. Latent today because clouds.js:252 constructs with `new LightRegistry()` and takes the defaults, but it is a trap for the next caller, and the export MAX_SHADOWED_LIGHTS is currently a number the code does not enforce anywhere."
+   },
+   {
+    "file": "src/render/lights.js",
+    "line": 146,
+    "problem": "`const n = Math.hypot(dst[0], dst[1], dst[2]) || 1;` guards against dividing by zero but lets a zero direction vector survive normalisation unchanged. A spot with direction [0,0,0] then emits nothing at all, while still consuming a march slot and still counting toward signature().",
+    "evidence": "`add(shipLamp({ direction: [0,0,0] }))` leaves light.direction as [0,0,0] (measured). In the shader that makes the cone term smoothstep(cos(0.30), cos(0.13), dot(-L, vec3(0))) = smoothstep(0.9553, 0.9916, 0) = 0, so the lamp is black in every direction \u2014 yet prepare() still ranks and packs it, and signature() still reports 5.0. That is precisely the feedback loop the header at lines 30-35 says must never break: the ship broadcasts loudly and the player sees no beam. It is reachable the moment someone wires this in, because `Light.apply` only skips the field when `p.direction` is falsy, and a fresh `new THREE.Vector3()` \u2014 the natural thing to pass on frame 0 \u2014 is truthy with all components zero."
+   },
+   {
+    "file": "src/render/lights.js",
+    "line": 179,
+    "problem": "`remove(id)` deletes from the Map but never splices `this.active`, so a light removed after prepare() and before writeUniforms() is still packed into the uniforms and still drawn for that frame.",
+    "evidence": "add -> prepare -> remove -> writeUniforms against a mock uniform object returned registered: 0 but written: 1 and uLightCount: 1. Harmless on today's call order (clouds.js:797-798 runs prepare and writeUniforms back to back), but the moment creatures despawn on their own schedule a dead creature's lantern will flash for one frame at its last position \u2014 a false 'something is there' in a game whose entire dread mechanic is inference from partial light."
+   },
+   {
+    "file": "src/render/lights.js",
+    "line": 314,
+    "problem": "The spot does not produce a shaft. Viewed along its own axis it renders as a flat, hard-edged, saturated white DISC that occludes the cloud behind it; viewed from the side it is a hard geometric wedge with radial streaking around the source. The mechanism is that along the beam axis dot(L, rd) is near-constant for every sample in the cone, so the phase term, the squared cone term and the integrated attenuation are all flat across the disc and the result saturates to white with no interior structure. This is the 'solid of revolution' artifact the shader comment claims to have cured by squaring the cone term; squaring softened it, it did not remove it.",
+    "evidence": "I captured it: evidence/audit_lamp_shadow_on.png \u2014 shipLamp at intensity 12, aimed along the view axis, camera at densityAt 0.60 \u2014 is a clean white circle with a soft rim in the middle of the frame, no cone, no axial falloff, no density structure, and it hides a small cloud that is behind it. Compare evidence/audit_lamp_off.png, the identical frame with the lamp off. The previous agent's own evidence/gr_lamp_along.png shows the same disc more softly, and evidence/gr_lamp_side.png shows the side view as a solid white wedge with a dark radial fan behind the source. Note also that evidence/gr_lamp.png, filed as lamp evidence, contains no visible lamp contribution at all. The art direction's requirement that shafts 'bend around what is actually in the volume' is not met by this shape, even though the occlusion march underneath it demonstrably works."
+   }
+  ],
+  "deadCode": [
+   "shipLamp() \u2014 src/render/lights.js:308. Exported, zero callers in the repo.",
+   "thrusterPlume() \u2014 src/render/lights.js:326. Exported, zero callers in the repo.",
+   "bioluminescence() \u2014 src/render/lights.js:361. Exported, zero callers in the repo. Only lightningCell() is ever constructed (clouds.js:263).",
+   "LightRegistry.signature() \u2014 src/render/lights.js:277. Zero callers. signature.js does not import lights.js at all; its photic channel reads a separate lumen-based bus.",
+   "LightRegistry.debugSummary() \u2014 src/render/lights.js:287. Zero callers, despite existing specifically so captures can name their live lights.",
+   "LightRegistry.get() and LightRegistry.clear() \u2014 src/render/lights.js:178, 180. Zero callers.",
+   "MAX_SHADOWED_LIGHTS \u2014 src/render/lights.js:52. Exported but never imported anywhere, and the constructor at line 155 does not clamp against it either, so it is documentation with no enforcement.",
+   "LIGHT_KIND \u2014 src/render/lights.js:54. Exported but used only inside this file."
+  ],
+  "integrationNeeds": "main.js changes, in order. Nothing needs to be added to the render path \u2014 clouds.js:797-798 already calls lights.prepare() and lights.writeUniforms() inside _writeCameraUniforms, once per drawn frame.\n\n1. IMPORT (near main.js:18, beside the CloudSystem import):\n   import { shipLamp, thrusterPlume } from './render/lights.js';\n\n2. CONSTRUCT, once, after `const clouds = new CloudSystem(...)` at main.js:63 and after `const ship = new Flight({ rng })` at :67:\n   const lampId  = clouds.lights.add(shipLamp());\n   const plumeId = clouds.lights.add(thrusterPlume());\n   const LAMP_FWD = new THREE.Vector3();   // module-scope scratch, like TURB at :152\n   const LAMP_POS = new THREE.Vector3();\n   let lampOn = true;                       // bind to a key via input/controls later\n\n3. PER FIXED STEP, inside update(dt) at main.js:121, AFTER ship.step(dt) (:142) and BEFORE clouds.update(dt, camera) (:147) so the registry sees this step's pose:\n   LAMP_FWD.copy(ship.forward);                    // Flight exposes `get forward()` at flight.js:162\n   LAMP_POS.copy(ship.position).addScaledVector(LAMP_FWD, 2.0);\n   clouds.lights.set(lampId, {\n     position:  [LAMP_POS.x, LAMP_POS.y, LAMP_POS.z],\n     direction: [LAMP_FWD.x, LAMP_FWD.y, LAMP_FWD.z],\n     on: lampOn,\n   });\n   LAMP_POS.copy(ship.position).addScaledVector(LAMP_FWD, -3.0);\n   clouds.lights.set(plumeId, {\n     position:  [LAMP_POS.x, LAMP_POS.y, LAMP_POS.z],\n     direction: [-LAMP_FWD.x, -LAMP_FWD.y, -LAMP_FWD.z],\n     intensity: 1.5 * (0.15 + 0.85 * ship.throttleSmoothed),   // ship.throttleSmoothed, flight.js:142\n     on: ship.throttleSmoothed > 0.01,\n   });\n\n   MANDATORY: `direction` must never be all zeros. A zero vector survives normalisation (lights.js:146) and the spot goes silently black while still counting toward signature() \u2014 see the bug list. Do not seed it from an unpopulated Vector3.\n\n4. NO RENDER CALL. Do not call prepare() or writeUniforms() from main.js; clouds.js owns that and calling it twice would double-write the uniforms.\n\n5. EXPOSE, in the globalThis.GAME literal at main.js:205:\n     lights: clouds.lights,\n   and add `lights ${JSON.stringify(clouds.lights.debugSummary().keys)}` to the diag string at main.js:194 so a capture can state which lights were live.\n\n6. BEFORE ANY OF THIS, cut the light budget. With MAX_MARCH_LIGHTS at 8 the volumetric pass measures 15.2 ms against a 7 ms budget once eight lights are in range. Two ship lights are affordable (measured 4.18 ms at n=1); the third light already exceeds budget at 7.49 ms. Set MAX_MARCH_LIGHTS to 3 in lights.js:47 before wiring, or the first storm cell that fires next to the ship blows the frame.\n\n7. SIGNATURE, separate task: signature.js does not import lights.js and its photic channel is in lumens (SIG.caps.photic 60000, exposureRef 40000) while lights.signature() returns radiance (~6.5 for lamp + plume). The ShipSystems class its _photic() reads from does not exist in the repo. Wiring these together needs a MEASURED radiance-to-lumen conversion against the anchor table in signature.js \u2014 not a guessed constant."
+ },
+ {
+  "module": "src/game/signature.js",
+  "verdict": "usable-with-repair",
+  "linesOfRealLogic": 533,
+  "complete": [
+   "Module loads clean and exports everything claimed. `await import('/src/game/signature.js?v=...')` in the live page returns CHANNELS, CHANNEL_ALIASES, CHANNEL_CLASS, CHANNEL_UNITS, EmissionBus, RECORDER, SIG, Signature, SignatureRecorder, TRAIL. No console errors, no missing math import.",
+   "The channel-assembly arithmetic is CORRECT and reproduces contract 3.2 exactly when fed a systems object. I wrote the missing ShipSystems from the anchor table and drove it 600 s per state. Measured / contract: idle 18.00/11.98/2.95/1.00/0.050 vs 18/12/3/1.0/0.05; cruise 46.01/39.95/3.00/2.20/0.600 vs 46/40/3/2.2/0.6; hard turn 51.97/\u2026/1.782 vs 52/\u2026/1.8; boost 78.00/129.83/3.25/7.50/4.030 vs 78/130/3/7.5/4.0. Every value inside 1%.",
+   "Powered-down anchor is exact with no systems at all: acoustic 4.000 dB(V), thermal 0, photic 0, em 0, wake 0.0200, relSpeed 0 after 30 s. Contract row 1 is 4/0/0/0/0.02.",
+   "Power-domain acoustic summation is right, not dB addition. At cruise with gLoad 20, breakdown('acoustic') reports engine 46 dB = 52% and airframe load 45.59 dB = 48% (power ratio), while the channel reads 48.82 dB \u2014 the correct incoherent sum, not 91.6.",
+   "The acoustic decay timescale is real and matches the header's headline claim. From a settled 46.01 dB cruise, cutting engines and reactor: 15.35 s to fall below the Listener's 16 dB(V) threshold, 22.47 s below its 6 dB listening threshold. Trace: 1 s 44.03, 5 s 36.14, 10 s 26.29, 15 s 16.64, 20 s 8.45 dB. Cutting engines does meaningfully drop acoustic, on a 2.2 s power time constant that costs ~15 s of real exposure.",
+   "Field channels die in exactly one frame, as designed. Cruise with search lamp: photic 9003 lm, em 2.60 EMU. One 1/120 s step after switching off: photic 0, em 0. Acoustic in the same step only fell 46.01 -> 45.99, which is the intended asymmetry.",
+   "Thermal is a true 90 s integrator. From cruise 39.53 dK: 28.32 at 30 s, 20.29 at 60 s, 14.54 at 90 s, 5.35 at 180 s, and 294.4 s to drop under the Wake Hunter's 1.5 dK threshold. A boost is warm for minutes, as the contract requires.",
+   "The tension the mandate asks about is real on every channel, once systems exist. Throttle sweep 0/0.25/0.5/0.75/1.0 -> acoustic 18.0/18.9/24.2/34.6/46.0 dB, thermal 12/19/26/33/39.9 dK, em 1.0/1.3/1.6/1.9/2.2, wake 0.050/0.084/0.187/0.359/0.600; boost 78/129.8/7.5/4.03. Monotone up on all six. exposure().total 0.064 -> 0.337 -> 0.660. Lights: photic exposure 0.131 dark, 0.669 nav on, 0.871 lamp on. Every survival action costs.",
+   "CloudSystem satisfies the medium interface with no adapter. clouds.flowAt(x,y,z,out) fills AND returns the out object (verified rv===probe), clouds.densityAt exists. Driven inside a real cloud (rho 0.519) vs clear air: densityFactor 2.245 vs 1.000, thermal tau 52.1 s vs 90.0 s, idle thermal 6.88 vs 11.17 dK, wake 0.1251 vs 0.0547. The designed trade \u2014 the bank cools you and thickens your wake \u2014 measurably works.",
+   "relSpeed is the contact channel the contract describes. At the same point in a 14.9 m/s current: holding station reads 15.114 m/s, riding the flow reads 0.402 m/s. Drifting is actively concealing.",
+   "Real Flight integration works with no shims. A real Flight at full throttle settles at 148.0 m/s and drives the Signature to 46.01 dB / 0.600 wake. Full yaw held: gLoad peaks 82.07, slip 0.653 rad, acoustic 57.73 dB, wake 2.068; sustained turn settles at 55.6 dB / 1.615.",
+   "Recorder holds the contract's 300 s at 2 Hz. capacity 600, count 600 after a 400 s run, history('acoustic',300).length 600, at(0) and at(9.1) return full six-channel objects with simTime 400 and 391, at(300) correctly returns null rather than clamping. The brief's aliases work: history('vibration') resolves to acoustic.",
+   "Trail buffers never exceed cap. 900 s cruise: wake parcels 239 at 60 s, 767 at 192 s, 768 from 300 s on; thermal 120/384/512. Both pinned at cap, no growth, no leak.",
+   "rebase() is correct. sampleWake at a fixed world point read 2.289 before and 2.289 after rebasing the whole field by the ship's 8880 m of travel.",
+   "dumpHeat() does what its doc claims. Cruise 38.57 dK, dumpHeat(0.8) returned 30.86 and left the hull at 7.71 dK, with a decoy cluster reading 69.91 dK 60 m behind. The heat moves, it does not vanish.",
+   "Cost is not a problem. With both buffers full (768 + 512 parcels) and the real CloudSystem as medium, one update() step measured 0.0173 ms over 12000 steps \u2014 2.08 ms of CPU per second of simulated time, ~1.2% of the 3.0 ms/frame update budget.",
+   "Robust against a minimal ship. An object with only position and velocity (no forward, gLoad, slipAngle) runs 600 steps plus dumpHeat, impact and report without throwing."
+  ],
+  "gaps": [
+   {
+    "what": "ShipSystems does not exist anywhere in the repo. `update()` calls `systems.emit(this.bus, this.kin, ship)` at line 598 and every emission except the airframe-load term and a 0.05 lm plume arrives through that call. Measured with systems=null at full-throttle 148 m/s cruise: acoustic 4.00 dB, thermal 0, photic 0.05, em 0 \u2014 identical to a powered-down hull on three of six channels. Throttling from 0 to 1 changes the acoustic channel by exactly 0.00 dB. The mandate's central tension does not exist without this class.",
+    "severity": "blocking",
+    "fix": "Write src/game/systems.js exporting a ShipSystems with `emit(bus, kin, ship)`. These exact publications reproduce every anchor (I verified all four states to within 1%): reactor {acousticDb 17.82, thermalKps 0.1333, emu 1.0, wakeInv 0.03}; instruments {photicLm 2.95}; engine scaled by throttleSmoothed with boostSmoothed lerping the endpoints {acousticDb 46->78, thermalKps 0.311->1.311, emu 1.2->6.5, wakeInv 0->2.57}; nav lights {photicLm 1200, emu 0.1}; search lamp {photicLm 9000, emu 0.4, thermalKps 0.0222}; scan capacitor ramping emu 0->20 over 1.5 s then a 0.2 s pulse {acousticCrackDb 96, photicLm 40000, emu 60, thermalK +6}. Feed photicLm from the existing LightRig.signature() in src/render/lights.js:277 rather than hard-coding it."
+   },
+   {
+    "what": "The module is not reachable from the game. `Object.keys(GAME)` on the live page at http://127.0.0.1:8182 returns THREE, renderer, scene, camera, loop, rng, BUDGET, clouds, ship, controls, shipCam, input, pointer, pad, stats, violations, seek, diag, capture, benchRender, ready \u2014 no signature. `grep -rn signature --include=*.js` finds zero imports of the file outside itself. 985 lines of dead code.",
+    "severity": "blocking",
+    "fix": "See integrationNeeds."
+   },
+   {
+    "what": "tests/signature.js does not exist. The file header at line 21 states 'tests/signature.js asserts every anchor' and the tuning block at line 137 calls it 'the acceptance test'. tests/ contains only controls.test.js and index.html.",
+    "severity": "major",
+    "fix": "Add tests/signature.test.js registered in tests/index.html, asserting all eleven contract 3.2 anchor rows, the 300 s recorder, and the parcel caps over a 900 s run \u2014 contract 12 lists exactly these four."
+   },
+   {
+    "what": "The scan capacitor \u2014 the one channel store the module explicitly delegates \u2014 has no owner. Line 769-770 says the EM store 'lives in ShipSystems, because it is a piece of equipment'. Nothing implements it, so contract 3.2's two most dramatic rows (pre-charge ramping to 20 EMU over 1.5 s, pulse at 96 dB / 40000 lm / 60 EMU) are unreachable. em never exceeds 7.5 in any state I could drive.",
+    "severity": "major",
+    "fix": "Implement the capacitor inside ShipSystems as described above."
+   },
+   {
+    "what": "Parcel radius growth from contract 3.3 (`radius = 8 + 1.5 * age`) is unimplemented. TRAIL.thermalRadius0 (line 241) and TRAIL.thermalRadiusGrowth (line 242) are declared and never read anywhere in the file; ParcelField.hasRadius is assigned at line 427 and never read. sample() at line 468 uses only the receiver's senseRadius.",
+    "severity": "minor",
+    "fix": "Either implement the growing radius in ParcelField.sample (falloff against parcel radius + senseRadius) or delete the three dead members and note in the header that 4.4's falloff is receiver-only by decision."
+   },
+   {
+    "what": "TRAIL.wakeTauTurbGain = 8.0 was tuned against a graded turbulence field that the shipped CloudSystem does not produce. I sampled 20000 random points: 78.2% read turbulence exactly 0, and inside cloud (density > 0.05, n=1567) the median is 1.000 and p05 is 0.736. So tauWake = 60/(1+8u) is 60 s in clear air and 6.7 s inside cloud with almost nothing between, against the contract's designed 43 s / 9.4 s gradient. The 'fly into rough air to erase your trail' lever is a binary switch, not a dial.",
+    "severity": "major",
+    "fix": "Either soften the constant so the two regimes are less than 9x apart, or give CloudSystem a graded turbulence output and re-measure p05..p95 before re-picking wakeTauTurbGain. Do not guess the new value \u2014 measure the field first."
+   },
+   {
+    "what": "breakdown() allocates on every call. b1===b2 is false and b1[0]===b2[0] is false: line 899 slices, maps and spreads a fresh object per item, then sorts. report() calls it six times via dominant(). PERFORMANCE_BUDGET.md line 141 sets steady-state per-frame allocations at 0, 'Not few'.",
+    "severity": "minor",
+    "fix": "Have the HUD call breakdown()/report() at 10 Hz, not per frame; or add a zero-alloc variant that sorts an index array over the preallocated _parts items."
+   },
+   {
+    "what": "The contract's hard-turn anchor assumes inputs the shipped flight model does not produce. SIG.manoeuvreGRef = 36 m/s2 and the wakeSlipInv comment assumes slip 0.30 rad, but a real Flight at full yaw peaks at gLoad 82.07 / slip 0.653 rad and settles at 59.6 / 0.57. The resulting sustained turn reads 55.6 dB and 1.615 wake against the anchor's 52 and 1.8 \u2014 inside the 10% tolerance, but by accident rather than by calibration.",
+    "severity": "minor",
+    "fix": "Restate the anchor's assumed inputs in the SIG comment as the flight model's measured sustained-turn values (gLoad 59.6, slip 0.57) so the next person retuning either file knows which numbers are coupled."
+   },
+   {
+    "what": "Signature keeps its own clock (this.time, line 518) independent of loop.simTime, and stamps recorder samples with it. Creature senses look up emissions by age against sim time.",
+    "severity": "minor",
+    "fix": "Either pass loop.simTime into update() or assert once at wiring time that signature.time === loop.simTime, so a mid-session construction or a seek cannot silently offset every acoustic detection."
+   }
+  ],
+  "bugs": [
+   {
+    "file": "src/game/signature.js",
+    "line": 826,
+    "problem": "A drifting or station-keeping ship is the LOUDEST thing in the game on the wake trail channel \u2014 the exact inverse of the design's central promise. _shed() sheds a parcel on a wall-clock 4 Hz timer with no spatial gate, so a ship that is not moving stacks all 768 parcels at one point, and ParcelField.sample() (line 468, per contract 4.4) sums every parcel inside the sense radius.",
+    "evidence": "Engine-off coasting ships, 250 s settle, sampleWake at the ship with the Wake Hunter's 165 m radius (threshold 0.05, saturation 2.0). speed 0: live channel 0.0200, 768 parcels in radius, stimulus 4.595 = 92x threshold and 2.3x saturation. 2 m/s: 330 parcels, 2.193. 5 m/s: 132 parcels, 1.133. 20 m/s: 33 parcels, 0.460. 148 m/s cruise: 4 parcels, 1.011. Drifting reads 4.5x louder than full cruise. CREATURE_BEHAVIOR_CONTRACT.md 3.3 states 'Drifting sheds wake at 0.02 s-1, below every threshold. Drifting genuinely leaves no wake trail.'"
+   },
+   {
+    "file": "src/game/signature.js",
+    "line": 840,
+    "problem": "Same co-location failure on the thermal trail, with a larger multiple. A station-keeping ship piles 512 thermal parcels of ~6.5 dK at one point and the summed stimulus is two orders of magnitude above the hull's actual excess temperature.",
+    "evidence": "Station keeping (reactor only, zero velocity), 400 s: live thermal 11.86 dK, 512 parcels, sampleThermal at the ship with the Wake Hunter's 220 m radius = 572.69 dK. Its threshold is 1.5 dK and its saturation is 40 dK, so a parked ship is 14x past saturation on a channel its own hull reads at 11.86."
+   },
+   {
+    "file": "src/game/signature.js",
+    "line": 748,
+    "problem": "The bus vent path deletes heat outright and sheds no decoy, contradicting the module's own doc at lines 848-856 ('The heat does not vanish... A countermeasure that deleted the heat outright would be strictly better than not using it, which Pillar 2 forbids'). It is also applied per simulation step rather than per second or per event, so any plausible fraction annihilates the channel in well under a second. Signature.dumpHeat() (line 857) implements this correctly; the bus path does not.",
+    "evidence": "Settled cruise 38.57 dK with 512 thermal parcels, strongest 21.22 dK. A system publishing bus.thermalDumpFraction = 0.5 held for exactly 1.0 s: hull thermal 38.57 -> 0.0074 dK, thermal parcel count unchanged at 512, strongest parcel 21.22 -> 20.83 (natural decay only). 99.98% of the ship's heat was erased from the world with nothing shed in its place."
+   },
+   {
+    "file": "src/game/signature.js",
+    "line": 228,
+    "problem": "Wake parcels from a boost are evicted while still well above the Wake Hunter's detection threshold, which contract 3.3 and the 12 test list both forbid ('A parcel is never dropped while still above any creature's threshold'; 'a truncated trail is a detection that silently stops working'). TRAIL.wakeCap 768 at wakeShedHz 4 expires a parcel at 192 s, but a boost parcel at 4.03 s-1 decaying on tau 60 needs 263 s to reach 0.05.",
+    "evidence": "900 s boost run: oldest surviving wake parcel age 192.0 s, value 0.1643 s-1 \u2014 3.29x the 0.05 threshold \u2014 at the moment the ring buffer overwrites it. Cruise is safe by comparison (oldest parcel 192.0 s at 0.0245, below threshold) and the thermal buffer is safe in both states (boost oldest 255.5 s at 0.686 dK vs 1.5). Honouring the guarantee needs wakeCap >= 1054, or a lower shed rate."
+   },
+   {
+    "file": "src/game/signature.js",
+    "line": 214,
+    "problem": "SIG.exposureRef.relSpeed = 148 is the CRUISE value, not the channel's extreme, so the relSpeed exposure bar pegs at 1.000 during ordinary cruise and cannot report anything above it. The comment two lines above (line 206) states 'These divisors are the anchor table's extremes, so a reading of 1.0 means as loud as this ship gets on this channel'. The other five refs are genuine extremes (106 = hull impact, 130 = boost, 40000 and 60 = scan pulse, 4.0 = boost).",
+    "evidence": "Throttle sweep: at throttle 1.0 exposure().worst is 'relSpeed' with worstValue 1.000; at boost (relSpeed 237 m/s, 60% faster) exposure().per.relSpeed is still exactly 1. SIG.caps.relSpeed is 400, so the channel has 2.7x of headroom the meter cannot show."
+   },
+   {
+    "file": "src/game/signature.js",
+    "line": 346,
+    "problem": "SignatureRecorder stores six channels and a timestamp but no position, so every acoustic detection built on it is logged as spatially approximate. src/game/creatures/creature.js:305-315 states the chosen reading explicitly \u2014 'the recorder stores position alongside the six channels... It is three more floats on a 14 KB buffer and it is the difference between a detection that can be replayed and one that cannot' \u2014 and falls back to stamping positionExact: false otherwise. Transmission (4.1) needs the distance and path from where the sound was MADE, not where the ship is now.",
+    "evidence": "createSignatureView(sig.recorder).sampleAt(9.1, ship.position) after a 60 s cruise returns {acoustic: 46.007, ..., x: 8880.0, y: 0, z: 0, positionExact: false, simTime: 51}. The x it reports is the ship's position now, not its position at simTime 51 \u2014 1347 m of error at cruise for a 9.1 s acoustic latency."
+   },
+   {
+    "file": "src/game/signature.js",
+    "line": 83,
+    "problem": "The header's derived design claim is arithmetically wrong in its second half. It states a full power-down from cruise takes '15 s to fall below the Listener's 16 dB(V) threshold and 21 s to reach the hull floor'. The first figure is right; the second is off by 40%.",
+    "evidence": "Measured from a settled 46.01 dB cruise with all emitters cut: below 16 dB at 15.35 s (claim 15, correct), below 6 dB at 22.47 s, and 29.56 s to reach 4.1 dB. At the claimed 21 s the ship is still at ~7.3 dB. The knock-on design claim 'The Listener's silent listening window is 18-26 s. You cannot start going quiet when it goes quiet' therefore only holds for windows shorter than 22.5 s \u2014 for the top half of the 18-26 s range a player who starts the power-down at the window's opening does get under the 6 dB listening threshold in time."
+   },
+   {
+    "file": "src/game/signature.js",
+    "line": 246,
+    "problem": "The TRAIL.thermalShedFraction justification is arithmetically false, and it is the stated basis for the thermal buffer cap. The comment claims 0.55 'is what makes a cruising ship's thermal trail fall below the Wake Hunter's 1.5 dK threshold after 242 s'.",
+    "evidence": "A cruise hull sits at 39.95 dK, so a shed parcel is 21.97 dK, and 55*ln(21.97/1.5) = 147.6 s, not 242. Even a boost parcel (71.39 dK) reaches 1.5 dK at 212.4 s. No reachable ship state produces 242 s \u2014 that would need a hull at 222 dK. The 512-parcel cap it justifies happens to be safe anyway (256 s expiry vs a 212.4 s worst case), so this is a wrong derivation rather than a broken buffer, but it will mislead the next person who resizes it."
+   },
+   {
+    "file": "src/game/signature.js",
+    "line": 316,
+    "problem": "EmissionBus.add() silently drops emissions past capacity 24, and the comment that is supposed to justify it is an unfinished sentence: 'silently dropping is / worse than not adding'. This is one of several places the file reads as having been abandoned mid-thought.",
+    "evidence": "new EmissionBus() then 40 add() calls: 24 recorded, 16 returned null and vanished. No warning, no counter, no assertion. A ShipSystems with per-light and per-subsystem granularity will approach 24 sources."
+   }
+  ],
+  "integrationNeeds": "main.js changes, in order.\n\n1. IMPORT (beside the other game imports at line 19-21):\n   import { Signature } from './game/signature.js';\n   import { ShipSystems } from './game/systems.js';   // does not exist yet - see gaps\n\n2. CONSTRUCT after `clouds` and `ship` exist (clouds is line 63, ship is line 67):\n   const signature = new Signature({ medium: clouds });\n   const systems = new ShipSystems({ lights: lightRig });\n   Passing `clouds` as the medium is verified to work with no adapter: CloudSystem.densityAt(x,y,z) and CloudSystem.flowAt(x,y,z,out) both match what Signature expects, flowAt fills and returns the out object, and driving through real cloud measurably moved densityFactor 1.000 -> 2.245 and thermal tau 90 -> 52.1 s.\n\n3. PER-FRAME, inside update(dt), AFTER `ship.step(dt)` (line 142) and before `shipCam.update` (line 144):\n   signature.update(dt, ship, systems);\n   Order is load-bearing: _kinematics reads ship.velocity, ship.gLoad and ship.slipAngle, and flight.js only writes gLoad and slipAngle at the end of step() (lines 291-295). Calling before step() reads last frame's manoeuvre.\n   main.js already samples clouds.flowAt and clouds.densityAt at the ship each frame (lines 128-130) for turbulence; Signature resamples them independently on a 30 Hz rota. The duplicate cost is negligible (whole update() measured at 0.0173 ms/step with both trail buffers full and the real medium attached, ~1.2% of the 3 ms update budget), so either share the sample or leave it.\n\n4. FLOATING ORIGIN. main.js does not rebase yet, but Flight.rebase(offset) exists at flight.js:343. Whenever the rebase call site is added, `signature.rebase(offset)` must be called in the same place and with the same offset \u2014 trail parcels are stored in world space and will otherwise be stranded. Verified: sampleWake read 2.289 before and 2.289 after an 8880 m rebase, so the method is correct, it just has no caller.\n\n5. EXPOSE ON GAME (the object literal at line 204-206), because right now Object.keys(GAME) has no signature entry at all:\n   globalThis.GAME = { ..., ship, signature, systems,\n     sig: () => signature.report(),\n     sigBreakdown: (c) => signature.breakdown(c), ... }\n\n6. EVENT HOOKS that currently have no caller anywhere in the repo:\n   - signature.impact(severity) on any hull collision (sets the 110 dB transient and the +2.5 s-1 wake impulse; verified 106.6 dB at 0.1 s decaying to baseline by 3 s).\n   - signature.dumpHeat(fraction, ship) for the emergency vent. Use this method, NOT bus.thermalDumpFraction \u2014 the bus path erases heat without shedding a decoy (bug above).\n\n7. HUD/instrument rate limit: call signature.breakdown() / report() at 10 Hz or slower. Both allocate fresh arrays and objects on every call, and PERFORMANCE_BUDGET.md line 141 requires zero steady-state per-frame allocations. signature.values() is safe per-frame (returns a reused object; verified identity-stable).\n\n8. CREATURES, when they arrive: pass signature.recorder into createSignatureView() from src/game/creatures/creature.js:318 \u2014 it already accepts the recorder's at(age) shape and returns a normalised percept. Be aware it will stamp positionExact: false until the recorder stores position."
+ }
+]
